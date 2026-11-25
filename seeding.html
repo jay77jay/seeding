@@ -128,7 +128,7 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
    任務清單：同倉庫的人（hub_settings/users.warehouses 含任務的 wh）都看得到，點進去就加入；被指派只是標記。
    拿到任務網址（?task=）的 Hub 使用者也能加入（沒有 wh 的舊任務靠這個）。
    ?demo=1 用假資料，不連 Firestore（測試畫面用）。 */
-const SEED_VERSION = '2026-11-26-1';
+const SEED_VERSION = '2026-11-26-2';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DEMO = new URLSearchParams(location.search).has('demo');
@@ -176,7 +176,7 @@ function fireApi(){
       const users = u.exists ? u.data() : {}, email = (user.email || '').toLowerCase();
       const rec = users[email] || Object.entries(users).find(([k]) => k.toLowerCase() === email)?.[1];
       const admins = ((g && g.exists && g.data().superAdmins) || []).map(x => String(x).toLowerCase());
-      return {ok: !!rec || admins.includes(email), blocked: !!(rec && (rec.blockedSystems || []).includes('seeding')), name: (rec && rec.name) || user.displayName || email,
+      return {ok: !!rec || admins.includes(email), admin: admins.includes(email), blocked: !!(rec && (rec.blockedSystems || []).includes('seeding')), name: (rec && rec.name) || user.displayName || email,
         warehouses: ((rec && rec.warehouses) || []).map(String).filter(Boolean)};
     },
     watchTasks(cb){
@@ -206,6 +206,14 @@ function fireApi(){
     },
     updateTask(taskId, patch){ return T(taskId).update(patch); },
     addLog(taskId, x){ return T(taskId).collection('log').add({...x, at: Date.now(), by: me.email, byName: me.name}); },
+    // Firestore 刪文件不會連子集合一起刪：先刪 rounds、log 底下每一筆，最後刪任務本身
+    async deleteTask(taskId){
+      for(const sub of ['rounds', 'log']){
+        const qs = await T(taskId).collection(sub).get();
+        for(let i = 0; i < qs.docs.length; i += 400){ const b = db.batch(); qs.docs.slice(i, i + 400).forEach(d => b.delete(d.ref)); await b.commit(); }
+      }
+      await T(taskId).delete();
+    },
   };
 }
 
@@ -225,12 +233,13 @@ function demoApi(){
     onAuth(cb){ setTimeout(() => cb({email:'me@test', displayName:'測試員'}), 0); },
     login(){}, logout(){ location.reload(); },
     async profile(){ return {ok:true, blocked:false, name:'測試員', warehouses:['汐止倉']}; },
-    watchTasks(cb){ const f = () => cb([task]); subs.add(f); f(); return () => subs.delete(f); },
+    watchTasks(cb){ const f = () => cb(task.deleted ? [] : [task]); subs.add(f); f(); return () => subs.delete(f); },
     watchTask(id, cb){ const f = () => cb({...task}, rounds.map(r => JSON.parse(JSON.stringify(r)))); subs.add(f); f(); return () => subs.delete(f); },
     async join(){},
     async updateRound(tid, rid, patch){ const r = rounds.find(x => x.id === rid); for(const [k, v] of Object.entries(patch)) setPath(r, k, v); emit(); },
     async updateTask(tid, patch){ Object.assign(task, patch); emit(); },
     async addLog(){},
+    async deleteTask(){ task.deleted = true; emit(); },
   };
 }
 
@@ -392,8 +401,10 @@ function renderTask(app){
         <div class="s">${(r.orders || []).length} 籃・撿貨 ${pk.n}/${pk.total}・播種 ${s.put}/${s.total}・檢查 ${c.done}/${c.total}${nf ? `・<span class="pill warn">${nf} 異動</span>` : ''}${c.issues ? `・<span class="pill warn">${c.issues} 問題</span>` : ''}</div>
         ${ppl.length ? `<div class="s">👤 ${esc(ppl.join('、'))}</div>` : ''}
         <div class="bar"><i style="width:${s.total ? s.put / s.total * 100 : 0}%"></i></div></div></div>`; }).join('')}</div>
-    ${t.createdBy === me.email ? `<div class="card" style="margin-top:12px"><button class="btn ghost" id="closeTask">${t.status === 'closed' ? '重新開啟這個任務' : '結束這個任務'}</button>
-      <p class="muted">結束後就不會出現在大家的清單（勾「顯示已結束」仍可查看）。</p></div>` : ''}`;
+    ${t.createdBy === me.email || me.admin ? `<div class="card" style="margin-top:12px"><button class="btn ghost" id="closeTask">${t.status === 'closed' ? '重新開啟這個任務' : '結束這個任務'}</button>
+      <p class="muted">結束後就不會出現在大家的清單（勾「顯示已結束」仍可查看）。</p>
+      <button class="btn danger" id="delTask" style="margin-top:10px">刪除這個任務</button>
+      <p class="muted">刪除後所有輪次、撿貨／播種／檢查紀錄和問題回報都會消失，無法復原；正在用的同事會被帶回任務清單。只有發布的人和 Hub 管理員看得到這兩個按鈕。</p></div>` : ''}`;
   app.querySelectorAll('[data-r]').forEach(el => el.onclick = () => openRound(el.dataset.r));
   $('#share').onclick = async () => {
     const url = location.origin + location.pathname + '?task=' + encodeURIComponent(t.id);
@@ -404,6 +415,17 @@ function renderTask(app){
     const closing = t.status !== 'closed';
     if(closing && !confirm('確定結束這個任務？')) return;
     await api.updateTask(t.id, {status: closing ? 'closed' : 'open'}); toast(closing ? '已結束' : '已重新開啟');
+  };
+  const dt = $('#delTask'); if(dt) dt.onclick = async () => {
+    const done = S.rounds.reduce((a, r) => a + Object.keys(r.placed || {}).length + Object.keys(r.checked || {}).length, 0);
+    if(!confirm(`確定刪除「${t.name}」？\n\n${S.rounds.length} 輪、${t.orders || 0} 單${done ? `，已經有 ${done} 筆播種／檢查紀錄` : ''}。\n刪除後無法復原。`)) return;
+    dt.disabled = true; dt.textContent = '刪除中…';
+    const id = t.id;
+    try{
+      if(S.unsub){ S.unsub(); S.unsub = null; }   // 先停止監聽，免得刪到一半畫面跳「找不到任務」
+      await api.deleteTask(id);
+      toast('已刪除'); openTasks();
+    }catch(e){ toast('刪除失敗：' + e.message, 5000); dt.disabled = false; dt.textContent = '刪除這個任務'; openTask(id); }
   };
 }
 
@@ -716,7 +738,7 @@ api.onAuth(async (user, err) => {
   try{
     const pf = await api.profile(user);
     if(!pf.ok || pf.blocked){ renderLogin(`${user.email} 沒有使用權限，請聯絡管理員到 Hub 加入帳號。`); return; }
-    me = {email: (user.email || '').toLowerCase(), name: pf.name, warehouses: pf.warehouses || []};
+    me = {email: (user.email || '').toLowerCase(), name: pf.name, warehouses: pf.warehouses || [], admin: !!pf.admin};
   }catch(e){ renderLogin('讀取權限失敗：' + e.message); return; }
   const want = new URLSearchParams(location.search).get('task');
   if(want) openTask(want); else openTasks();
