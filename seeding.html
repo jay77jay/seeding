@@ -118,7 +118,8 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
      seeding_tasks/{taskId}            任務：name、project、wh（倉庫中文名，例如 汐止倉）、ships[]（這個任務含的物流）、createdBy、assignees[]、members[]（指派＋開過網址的人）、status、rounds、orders
                                        舊任務的 ship 是 order-batcher「物流上傳」的設定，不一定是訂單實際的物流，不再顯示
      seeding_tasks/{taskId}/rounds/{r} 每輪（最多 50 籃、只含一種物流）：ship、orders[{slot,seq,id,name,p3,note,items[{k,name,sku,qty}]}]
-        picked{ 商品雜湊: {by,byName,at,item} }    撿貨：這一輪要的數量已經撿齊
+        picked{ 商品雜湊: {by,byName,at,item} }    撿貨：這一輪要的數量已經撿齊（要撿的數量扣掉取消、優先訂單與已配籃）
+        log 的 checked：每一籃核對完成時記一筆（誰、哪一籃）
         placed{ "籃號_第幾項": {by,byName,at} }   播種已放
         checked{ "籃號_第幾項": {by,byName,at} }  檢查已核對
         owners{ 商品雜湊: {email,name,at,item} }  誰負責這個商品（不擋人，只提醒）
@@ -128,7 +129,7 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
    任務清單：同倉庫的人（hub_settings/users.warehouses 含任務的 wh）都看得到，點進去就加入；被指派只是標記。
    拿到任務網址（?task=）的 Hub 使用者也能加入（沒有 wh 的舊任務靠這個）。
    ?demo=1 用假資料，不連 Firestore（測試畫面用）。 */
-const SEED_VERSION = '2026-11-26-2';
+const SEED_VERSION = '2026-11-26-3';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DEMO = new URLSearchParams(location.search).has('demo');
@@ -302,9 +303,30 @@ function byName(a, b){
   return coll.compare(x.base, y.base) || coll.compare(x.rest, y.rest) || x.size - y.size || coll.compare(a.name, b.name) || coll.compare(a.key, b.key);
 }
 // 撿貨清單：依品名排序（勾了不移動位置）；整項都取消的商品不用撿
-const pickList = r => productsOf(r).filter(p => p.total > 0).sort(byName);
+// 撿貨清單：要撿的數量＝這一輪全部，扣掉「取消」「優先」的訂單（優先單通常先配好先出），再扣掉已經放進籃子的
+// 依品名排序（勾了不移動位置）；扣完不用撿的排在最後、不算進撿貨進度
+function pickList(r){
+  const m = new Map();
+  (r.orders || []).forEach(o => o.items.forEach(it => {
+    const key = itemKeyOf(it);
+    if(!m.has(key)) m.set(key, {key, name: it.name, sku: it.sku, all: 0, cancel: 0, pri: 0, placed: 0, need: 0, baskets: 0});
+    const p = m.get(key), q = Number(it.qty) || 0;
+    p.all += q;
+    if(isCancel(r, o.slot)) p.cancel += q;
+    else if(isPri(r, o.slot)) p.pri += q;
+    else if((r.placed || {})[pkey(o.slot, it.k)]) p.placed += q;
+    else { p.need += q; p.baskets++; }
+  }));
+  const ps = [...m.values()].sort(byName);
+  return [...ps.filter(p => p.need > 0), ...ps.filter(p => !p.need)];
+}
 const pickedOf = (r, key) => (r.picked || {})[hk(key)] || null;
-function pickStat(r){ const ps = pickList(r), n = ps.filter(p => pickedOf(r, p.key)).length; return {n, total: ps.length, done: ps.length > 0 && n === ps.length}; }
+function pickStat(r){ const ps = pickList(r).filter(p => p.need > 0), n = ps.filter(p => pickedOf(r, p.key)).length; return {n, total: ps.length, done: n === ps.length}; }
+// 這一籃是誰核對的（登入帳號），依核對時間先後
+function checkersOf(r, o){
+  const vs = o.items.map(it => (r.checked || {})[pkey(o.slot, it.k)]).filter(Boolean).sort((a, b) => a.at - b.at);
+  return [...new Map(vs.map(v => [v.by, v.byName || v.by])).values()];
+}
 const ownerOf = (r, key) => (r.owners || {})[hk(key)] || null;
 // 物流：新任務每輪各自記錄；舊任務的 ship 是上傳設定，可能跟實際不同，不顯示
 const shipOf = r => (r && r.ship) || '';
@@ -448,10 +470,12 @@ function renderRound(app, r){
   let body = '';
   if(S.mode === 'pick'){
     const ps = pickList(r), pk = pickStat(r);
+    const less = p => [p.pri && `優先 ${p.pri}`, p.cancel && `取消 ${p.cancel}`, p.placed && `已配籃 ${p.placed}`].filter(Boolean);
     body = (pk.done ? '<div class="banner ok">這一輪的商品都撿齊了 👍 切到「播種・商品」開始配。</div>' : '')
-      + `<p class="muted" style="margin:0 0 8px">先把這一輪要的商品撿齊：撿齊一種就點一下打勾，大家都看得到。數量不夠的話照撿，配完到「檢查」回報缺件。</p>`
-      + `<ul class="lines">${ps.map((p, i) => { const pd = pickedOf(r, p.key);
-        return `<li class="${pd ? 'put' : ''}" data-pi="${i}"><span class="ck">${pd ? '✓' : ''}</span><span class="n">${esc(p.name)}<br><span class="muted">${p.sku ? esc(p.sku) + '・' : ''}${p.total} 籃${pd ? `・${esc(pd.byName || pd.by)} ${fmtTime(pd.at)}` : ''}</span></span><span class="q">${p.units}</span></li>`; }).join('')}</ul>`;
+      + `<p class="muted" style="margin:0 0 8px">先把這一輪要的商品撿齊：撿齊一種就點一下打勾，大家都看得到。右邊數字是<b>還要撿的件數</b>，已扣掉優先、取消的訂單和已經放進籃子的。數量不夠的話照撿，配完到「檢查」回報缺件。</p>`
+      + `<ul class="lines">${ps.map((p, i) => { const pd = pickedOf(r, p.key), ls = less(p);
+        if(!p.need) return `<li class="put" style="opacity:.5;cursor:default"><span class="ck">－</span><span class="n">${esc(p.name)}<br><span class="muted">不用撿：共 ${p.all}，${esc(ls.join('、'))}</span></span><span class="q">0</span></li>`;
+        return `<li class="${pd ? 'put' : ''}" data-pi="${i}"><span class="ck">${pd ? '✓' : ''}</span><span class="n">${esc(p.name)}<br><span class="muted">${p.sku ? esc(p.sku) + '・' : ''}${p.baskets} 籃${ls.length ? `・共 ${p.all}，扣${esc(ls.join('、'))}` : ''}${pd ? `・${esc(pd.byName || pd.by)} ${fmtTime(pd.at)}` : ''}</span></span><span class="q">${p.need}</span></li>`; }).join('')}</ul>`;
     app.innerHTML = roundHead(r) + body;
     app.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { S.mode = b.dataset.m; render(); });
     app.querySelectorAll('[data-pi]').forEach(el => el.onclick = () => {
@@ -478,7 +502,11 @@ function renderRound(app, r){
     });
   }else{
     const iss = (r.orders || []).filter(o => issueOf(r, o.slot) && !isCancel(r, o.slot));
+    // 檢查人員統計：每一籃算在最後核對的人
+    const tally = new Map();
+    (r.orders || []).forEach(o => { const b = basketCheck(r, o); if(b.cancel || !b.done) return; const who = checkersOf(r, o).at(-1); if(who) tally.set(who, (tally.get(who) || 0) + 1); });
     body = (c.total && c.done === c.total ? '<div class="banner ok">這一輪全部檢查完了，可以包裝 👍</div>' : '')
+      + (tally.size ? `<p class="muted" style="margin:0 0 8px">檢查人員：${[...tally].map(([n, k]) => `${esc(n)} ${k} 籃`).join('、')}</p>` : '')
       + `<button class="btn sec" id="findBtn" style="margin-bottom:10px">🔍 找籃子（不知道這籃是誰的）</button>`
       + (iss.length ? `<div class="card" style="border-color:var(--warn)"><b style="color:var(--warn)">有問題的籃子</b>${iss.map(o => { const x = issueOf(r, o.slot);
           return `<div class="item" data-cs="${o.slot}" style="margin-top:6px"><div class="main"><div class="t">${o.slot} 號籃・${esc(o.name)}</div><div class="s">${esc(ISSUE[x.type] || x.type)}${x.note ? '：' + esc(x.note) : ''}・${esc(x.byName || x.by)} ${fmtTime(x.at)}</div></div></div>`; }).join('')}</div>` : '')
@@ -488,7 +516,7 @@ function renderRound(app, r){
         const b = basketCheck(r, o);
         if(b.cancel) return {cls:'cancel', q:'取消', click:true};
         if(b.issue) return {cls:'issue', q:'問題', click:true};
-        if(b.done) return {cls:'put', q:'✓', tag:'可包裝', click:true};
+        if(b.done) return {cls:'put', q:'✓', tag:(checkersOf(r, o).at(-1) || '可包裝').slice(0, 3), click:true};
         if(b.c) return {cls:'need', q:`${b.c}/${b.n}`, click:true};
         return {cls:'todo', q:'', tag:'待檢', pri: isPri(r, slot), click:true};
       });
@@ -606,7 +634,8 @@ function renderCheck(app, r){
   app.innerHTML = slotHeader(r, o, true)
     + (x ? `<div class="banner cancel" style="font-size:16px">有問題：${esc(ISSUE[x.type] || x.type)}${x.note ? '：' + esc(x.note) : ''}<br><span style="font-weight:400;font-size:13px">${esc(x.byName || x.by)} ${fmtTime(x.at)}</span></div>` : '')
     + (b.done && !x ? `<div class="banner ok">核對完成，可以包裝${lastBy ? `（${esc(lastBy.byName || lastBy.by)} ${fmtTime(lastBy.at)}）` : ''}</div>` : '')
-    + `<p class="muted" style="margin:0 0 8px">籃子裡的商品對上一項就點一下劃掉。</p>
+    + (b.c ? `<p class="muted" style="margin:0 0 6px">核對人：<b>${esc(checkersOf(r, o).join('、'))}</b></p>` : '')
+    + `<p class="muted" style="margin:0 0 8px">籃子裡的商品對上一項就點一下劃掉，會用你登入的帳號記錄是誰核對的。</p>
     <ul class="lines">${o.items.map(it => { const ck = (r.checked || {})[pkey(o.slot, it.k)];
       return `<li class="${ck ? 'put chk' : ''}" data-k="${it.k}"><span class="ck">${ck ? '✓' : ''}</span><span class="n">${esc(it.name)}${it.sku ? `<br><span class="muted">${esc(it.sku)}</span>` : ''}</span><span class="q">×${esc(it.qty)}</span></li>`; }).join('')}</ul>
     <div class="row" style="margin-top:12px">${x ? '<button class="btn" id="solve">問題已解決</button>' : '<button class="btn danger" id="issue">有問題</button>'}<button class="btn sec" id="findBtn">🔍 找籃子</button></div>`
@@ -617,7 +646,10 @@ function renderCheck(app, r){
     buzz(on ? 30 : [20, 40, 20]);
     const willDone = on && o.items.every(it => String(it.k) === el.dataset.k || (r.checked || {})[pkey(o.slot, it.k)]);
     api.updateRound(S.taskId, r.id, {[`checked.${k}`]: on ? stamp() : null}).catch(e => toast('儲存失敗：' + e.message, 4000));
-    if(willDone && !x){ buzz([40, 60, 40]); toast(`${o.slot} 號籃核對完成`); }
+    if(willDone && !x){
+      buzz([40, 60, 40]); toast(`${o.slot} 號籃核對完成`);
+      api.addLog(S.taskId, {action:'checked', round:r.no, slot:o.slot, seq:o.seq, orderId:o.id}).catch(() => {});   // 異動紀錄：誰在什麼時候核對完哪一籃
+    }
   });
   const ib = $('#issue'); if(ib) ib.onclick = () => openIssueSheet(r, o);
   const sb = $('#solve'); if(sb) sb.onclick = async () => {
