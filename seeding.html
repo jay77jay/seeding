@@ -84,6 +84,19 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
 .modal .sheet{background:var(--paper);width:100%;max-width:720px;max-height:88vh;overflow:auto;border-radius:16px 16px 0 0;padding:16px 14px calc(16px + env(safe-area-inset-bottom))}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:10px 16px;border-radius:20px;z-index:60;font-size:15px;max-width:90vw;text-align:center}
 #net{position:fixed;top:0;left:0;right:0;z-index:80;background:#b45309;color:#fff;text-align:center;font-size:13px;padding:3px}
+.cell.issue{background:var(--warn);border-color:var(--warn);color:#fff;cursor:pointer}
+.cell.issue .no{color:#fff}
+.cell.todo{background:#fff;border-color:var(--line);color:var(--mute);cursor:pointer}
+.cell.cancel[data-slot]{cursor:pointer}
+.who{background:#fff;border:2px solid var(--ink);border-radius:10px;padding:8px 12px;margin-top:6px;font-size:16px}
+.who .nm{font-size:30px;font-weight:900;line-height:1.2}
+.banner.note{background:#fff8d6;border:2px solid var(--tape);color:var(--tape-ink);margin:8px 0 0}
+.lines li.chk{background:#e3ebf3;border-color:var(--steel)}
+.lines li.chk .ck{background:var(--steel);border-color:var(--steel)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--line);background:#fff;border-radius:16px;padding:6px 12px;font-size:15px;cursor:pointer}
+.chip.on{background:var(--ink);border-color:var(--ink);color:#fff}
+.seg button:disabled{opacity:.4}
 </style>
 </head>
 <body>
@@ -101,22 +114,28 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
 <script>
 /* 播種配貨（手機）
    資料：Firestore ezfun-warehouse-billing
-     seeding_tasks/{taskId}            任務：name、project、createdBy、assignees[]、assigneeNames{}、status、rounds、orders
-     seeding_tasks/{taskId}/rounds/{r} 每輪（最多 50 籃）：orders[{slot,seq,id,name,p3,items[{k,name,sku,qty}]}]
-                                        placed{ "籃號_第幾項": {by,at} }、flags{ 籃號: {type:'cancel'|'priority',by,at} }、claim{email,name,at}、doneAt
-     seeding_tasks/{taskId}/log        取消／優先等異動紀錄
+     seeding_tasks/{taskId}            任務：name、project、ship、createdBy、assignees[]、members[]（指派＋開過網址的人）、status、rounds、orders
+     seeding_tasks/{taskId}/rounds/{r} 每輪（最多 50 籃）：orders[{slot,seq,id,name,p3,note,items[{k,name,sku,qty}]}]
+        placed{ "籃號_第幾項": {by,byName,at} }   播種已放
+        checked{ "籃號_第幾項": {by,byName,at} }  檢查已核對
+        owners{ 商品雜湊: {email,name,at,item} }  誰負責這個商品（不擋人，只提醒）
+        flags{ 籃號: {type:'cancel'|'priority',...} }、issues{ 籃號: {type:'short'|'extra'|'wrong',note,...} }
+     seeding_tasks/{taskId}/log        取消／優先／問題等異動紀錄
    籃號：A 面 1～25、B 面 26～50，每面 5 層 × 5 格，從最上層左邊開始往右、再往下。
+   任何在 Hub 使用者名單裡的人，拿到任務網址（?task=）都能加入；被指派只決定任務會不會出現在清單。
    ?demo=1 用假資料，不連 Firestore（測試畫面用）。 */
-const SEED_VERSION = '2026-11-25-1';
+const SEED_VERSION = '2026-11-25-2';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DEMO = new URLSearchParams(location.search).has('demo');
-const SLOTS = 50, PER_FACE = 25, COLS = 5;
+const PER_FACE = 25, COLS = 5, RECENT = 30 * 60 * 1000;
 $('#ver').textContent = 'v' + SEED_VERSION + (DEMO ? ' 測試' : '');
 
 function toast(msg, ms = 2200){ const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.h); toast.h = setTimeout(() => t.hidden = true, ms); }
 function buzz(ms = 30){ try{ navigator.vibrate && navigator.vibrate(ms); }catch(e){} }
 const fmtTime = ms => { const d = new Date(ms); return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+// 商品名稱可能含「.」等字元，不能直接當 Firestore 欄位名稱：轉成雜湊
+const hk = s => { let h = 5381; for(const ch of String(s)) h = ((h * 33) ^ ch.codePointAt(0)) >>> 0; return 'p' + h.toString(36); };
 
 /* ================= 資料層：Firestore 或測試假資料 ================= */
 let me = null;   // {email, name}
@@ -152,24 +171,27 @@ function fireApi(){
       const [u, g] = await Promise.all([db.collection('hub_settings').doc('users').get(), db.collection('hub_settings').doc('global').get().catch(() => null)]);
       const users = u.exists ? u.data() : {}, email = (user.email || '').toLowerCase();
       const rec = users[email] || Object.entries(users).find(([k]) => k.toLowerCase() === email)?.[1];
-      const admins = (g && g.exists && g.data().superAdmins) || [];
+      const admins = ((g && g.exists && g.data().superAdmins) || []).map(x => String(x).toLowerCase());
       return {ok: !!rec || admins.includes(email), blocked: !!(rec && (rec.blockedSystems || []).includes('seeding')), name: (rec && rec.name) || user.displayName || email};
     },
     watchTasks(cb){
-      const all = new Map(), push = () => cb([...all.values()]);
-      const take = qs => { qs.docChanges().forEach(ch => ch.type === 'removed' ? all.delete(ch.doc.id) : all.set(ch.doc.id, {id:ch.doc.id, ...ch.doc.data()})); push(); };
+      // 每個查詢各自保留結果，再合併（同一個任務可能同時符合多個條件）
+      const parts = [new Map(), new Map(), new Map()], push = () => { const all = new Map(); parts.forEach(m => m.forEach((v, k) => all.set(k, v))); cb([...all.values()]); };
       const err = e => toast('讀取任務失敗：' + e.message, 5000);
-      const u1 = db.collection('seeding_tasks').where('assignees', 'array-contains', me.email).onSnapshot(take, err);
-      const u2 = db.collection('seeding_tasks').where('createdBy', '==', me.email).onSnapshot(take, err);
-      return () => { u1(); u2(); };
+      const q = [db.collection('seeding_tasks').where('members', 'array-contains', me.email),
+                 db.collection('seeding_tasks').where('assignees', 'array-contains', me.email),
+                 db.collection('seeding_tasks').where('createdBy', '==', me.email)];
+      const us = q.map((qq, i) => qq.onSnapshot(qs => { parts[i] = new Map(qs.docs.map(d => [d.id, {id:d.id, ...d.data()}])); push(); }, err));
+      return () => us.forEach(u => u());
     },
     watchTask(id, cb){
-      let task = null, rounds = [];
-      const push = () => task && cb(task, rounds);
-      const u1 = T(id).onSnapshot(d => { task = d.exists ? {id:d.id, ...d.data()} : null; push(); }, e => toast('讀取失敗：' + e.message, 5000));
+      let task = null, rounds = [], gotT = false;
+      const push = () => gotT && cb(task, rounds);
+      const u1 = T(id).onSnapshot(d => { gotT = true; task = d.exists ? {id:d.id, ...d.data()} : null; push(); }, e => toast('讀取失敗：' + e.message, 5000));
       const u2 = T(id).collection('rounds').onSnapshot(qs => { rounds = qs.docs.map(d => ({id:d.id, ...d.data()})).sort((a,b) => a.no - b.no); push(); }, e => toast('讀取失敗：' + e.message, 5000));
       return () => { u1(); u2(); };
     },
+    join(taskId){ return T(taskId).update({members: FV.arrayUnion(me.email), [`memberNames.${hk(me.email)}`]: me.name}); },
     // patch 的 key 可以是 "placed.12_0" 這種路徑；值為 null 代表刪除
     updateRound(taskId, rid, patch){
       const p = {}; for(const [k, v] of Object.entries(patch)) p[k] = v === null ? FV.delete() : v;
@@ -183,20 +205,22 @@ function fireApi(){
 function demoApi(){
   const names = ['海報 A','T恤 黑 M','T恤 白 L','毛巾','貼紙組','帽子','手環','鑰匙圈','水壺袋','徽章'];
   let seed = 7; const R = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-  const mkRound = (no, n, seq0) => ({id: String(no).padStart(3,'0'), no, label:`散單_${String(no).padStart(2,'0')}`, seqFrom:seq0, seqTo:seq0+n-1, placed:{}, flags:{},
+  const mkRound = (no, n, seq0) => ({id: String(no).padStart(3,'0'), no, seqFrom:seq0, seqTo:seq0+n-1, placed:{}, flags:{}, checked:{}, owners:{}, issues:{},
     orders: Array.from({length:n}, (_, i) => { const k = 1 + Math.floor(R()*3), s = new Set(); while(s.size < k) s.add(names[Math.floor(R()*names.length)]);
-      return {slot:i+1, seq:seq0+i, id:'2026112500' + String(seq0+i).padStart(4,'0'), name:'測試' + (seq0+i), p3:String(100 + Math.floor(R()*900)),
+      return {slot:i+1, seq:seq0+i, id:'2026112500' + String(seq0+i).padStart(4,'0'), name:'測試' + (seq0+i), p3:String(100 + Math.floor(R()*900)), note: i % 7 === 3 ? '不要放發票' : '',
         items:[...s].map((nm, k2) => ({k:k2, name:nm, sku:'SKU-' + names.indexOf(nm), qty: R() < .8 ? 1 : 2}))}; })});
-  const task = {id:'demo', name:'測試任務 1125', project:'測試專案', createdBy:'me@test', assignees:['me@test'], assigneeNames:{'me@test':'測試員'}, status:'open', createdAt:Date.now(), rounds:2, orders:73};
+  const task = {id:'demo', name:'測試任務 1125', project:'測試專案', ship:'新竹', createdBy:'me@test', assignees:['me@test'], members:['me@test'], assigneeNames:{'me@test':'測試員'}, status:'open', createdAt:Date.now(), rounds:2, orders:73};
   const rounds = [mkRound(1, 50, 31), mkRound(2, 23, 81)];
   const subs = new Set(); const emit = () => subs.forEach(f => f());
   const setPath = (obj, path, v) => { const ks = path.split('.'); let o = obj; ks.slice(0,-1).forEach(k => o = o[k] = o[k] || {}); if(v === null) delete o[ks.at(-1)]; else o[ks.at(-1)] = v; };
+  window.__demo = {task, rounds, emit};
   return {
     onAuth(cb){ setTimeout(() => cb({email:'me@test', displayName:'測試員'}), 0); },
     login(){}, logout(){ location.reload(); },
     async profile(){ return {ok:true, blocked:false, name:'測試員'}; },
     watchTasks(cb){ const f = () => cb([task]); subs.add(f); f(); return () => subs.delete(f); },
-    watchTask(id, cb){ const f = () => cb({...task}, rounds.map(r => ({...r}))); subs.add(f); f(); return () => subs.delete(f); },
+    watchTask(id, cb){ const f = () => cb({...task}, rounds.map(r => JSON.parse(JSON.stringify(r)))); subs.add(f); f(); return () => subs.delete(f); },
+    async join(){},
     async updateRound(tid, rid, patch){ const r = rounds.find(x => x.id === rid); for(const [k, v] of Object.entries(patch)) setPath(r, k, v); emit(); },
     async updateTask(tid, patch){ Object.assign(task, patch); emit(); },
     async addLog(){},
@@ -204,7 +228,7 @@ function demoApi(){
 }
 
 /* ================= 狀態與工具 ================= */
-const S = {view:'login', taskId:null, task:null, rounds:[], rid:null, mode:'item', itemKey:null, slot:null, showClosed:false, unsub:null, unsubTasks:null, tasks:[]};
+const S = {view:'login', taskId:null, task:null, rounds:[], rid:null, mode:'item', itemKey:null, slot:null, showClosed:false, unsub:null, unsubTasks:null, tasks:[], warned:{}};
 const round = () => S.rounds.find(r => r.id === S.rid);
 const faceOf = slot => slot <= PER_FACE ? 'A' : 'B';
 const pkey = (slot, k) => `${slot}_${k}`;
@@ -212,11 +236,32 @@ const itemKeyOf = it => it.sku || it.name;
 const flagOf = (r, slot) => (r.flags || {})[slot] || null;
 const isCancel = (r, slot) => (flagOf(r, slot) || {}).type === 'cancel';
 const isPri = (r, slot) => (flagOf(r, slot) || {}).type === 'priority';
-// 每一輪的進度：取消的訂單不算
+const issueOf = (r, slot) => (r.issues || {})[slot] || null;
+const ISSUE = {short:'缺件', extra:'多件', wrong:'放錯商品', other:'其他'};
+const stamp = () => ({by: me.email, byName: me.name, at: Date.now()});
+const posText = slot => { const i = (slot - 1) % PER_FACE; return `${faceOf(slot)} 面第 ${Math.floor(i / COLS) + 1} 層第 ${i % COLS + 1} 格`; };
+
+// 播種進度：取消的訂單不算
 function roundStat(r){
   let total = 0, put = 0;
   (r.orders || []).forEach(o => { if(isCancel(r, o.slot)) return; o.items.forEach(it => { total++; if((r.placed || {})[pkey(o.slot, it.k)]) put++; }); });
   return {total, put, done: total > 0 && put === total};
+}
+// 檢查進度（以籃為單位）
+function basketCheck(r, o){
+  const n = o.items.length, c = o.items.filter(it => (r.checked || {})[pkey(o.slot, it.k)]).length;
+  return {n, c, done: n > 0 && c === n, issue: issueOf(r, o.slot), cancel: isCancel(r, o.slot)};
+}
+function checkStat(r){
+  let total = 0, done = 0, issues = 0;
+  (r.orders || []).forEach(o => { const b = basketCheck(r, o); if(b.cancel) return; total++; if(b.issue) issues++; else if(b.done) done++; });
+  return {total, done, issues};
+}
+// 最近 30 分鐘有動作的人
+function activePeople(r){
+  const t = Date.now() - RECENT, m = new Map();
+  [r.placed, r.checked].forEach(o => Object.values(o || {}).forEach(v => { if(v && v.at > t) m.set(v.by, v.byName || v.by); }));
+  return [...m.values()];
 }
 // 以商品為主：同一個商品在這一輪要放進哪些籃
 function productsOf(r){
@@ -228,21 +273,17 @@ function productsOf(r){
   }));
   return [...m.values()].sort((a,b) => (a.put === a.total) - (b.put === b.total) || b.need.length - a.need.length || a.name.localeCompare(b.name, 'zh-Hant'));
 }
-function claimWarn(r){
-  const c = r.claim; if(!c || c.email === me.email) return '';
-  const fresh = Date.now() - (c.at || 0) < 30 * 60 * 1000;
-  return fresh ? `${c.name || c.email} 正在播這一輪（${fmtTime(c.at)}）` : '';
-}
+const ownerOf = (r, key) => (r.owners || {})[hk(key)] || null;
 
 /* ================= 畫面 ================= */
 function setHeader(title, back){
   $('#title').textContent = title; $('#backBtn').hidden = !back; $('#flagBtn').hidden = !S.taskId || S.view === 'login' || S.view === 'tasks';
 }
 $('#backBtn').onclick = () => {
-  if(S.view === 'item' || S.view === 'slot'){ S.view = 'round'; S.itemKey = null; S.slot = null; }
+  if(S.view === 'item' || S.view === 'slot' || S.view === 'check'){ S.view = 'round'; S.itemKey = null; S.slot = null; }
   else if(S.view === 'round'){ S.view = 'task'; S.rid = null; }
   else if(S.view === 'task'){ openTasks(); return; }
-  render();
+  render(); window.scrollTo(0, 0);
 };
 $('#flagBtn').onclick = () => openFlagSheet();
 
@@ -256,6 +297,7 @@ function render(){
   if(S.view === 'round') return renderRound(app, r);
   if(S.view === 'item') return renderItem(app, r);
   if(S.view === 'slot') return renderSlot(app, r);
+  if(S.view === 'check') return renderCheck(app, r);
 }
 
 function renderLogin(msg = ''){
@@ -268,6 +310,7 @@ function renderLogin(msg = ''){
 function openTasks(){
   if(S.unsub){ S.unsub(); S.unsub = null; }
   S.view = 'tasks'; S.taskId = null; S.task = null; S.rounds = []; S.rid = null;
+  const u = new URL(location.href); u.searchParams.delete('task'); history.replaceState(null, '', u);
   if(!S.unsubTasks) S.unsubTasks = api.watchTasks(ts => { S.tasks = ts; if(S.view === 'tasks') render(); });
   render();
 }
@@ -282,7 +325,7 @@ function renderTasks(app){
         <div class="s">${t.rounds || 0} 輪・${t.orders || 0} 單・${fmtTime(t.createdAt || 0)} 由 ${esc(t.createdByName || t.createdBy)} 發布</div>
         <div class="s">指派：${esc((t.assignees || []).map(e => (t.assigneeNames || {})[e] || e).join('、'))}</div></div>
         <span class="pill ${t.status === 'closed' ? '' : 'ok'}">${t.status === 'closed' ? '已結束' : '進行中'}</span></div>`).join('')
-      || '<div class="card muted">目前沒有指派給你的播種任務。任務由整單系統（order-batcher）發布。</div>'}</div>
+      || '<div class="card muted">目前沒有你的播種任務。被指派、或開過任務網址的任務會出現在這裡；任務由整單系統（order-batcher）發布。</div>'}</div>
     <p style="text-align:center"><label class="muted"><input type="checkbox" id="showClosed" ${S.showClosed ? 'checked' : ''}> 顯示已結束的任務</label></p>`;
   app.querySelectorAll('[data-id]').forEach(el => el.onclick = () => openTask(el.dataset.id));
   $('#showClosed').onchange = e => { S.showClosed = e.target.checked; render(); };
@@ -291,27 +334,42 @@ function renderTasks(app){
 
 function openTask(id){
   S.taskId = id; S.task = null; S.rounds = []; S.view = 'task';
-  try{ localStorage.setItem('seeding_task', id); }catch(e){}
+  const u = new URL(location.href); u.searchParams.set('task', id); history.replaceState(null, '', u);
   if(S.unsub) S.unsub();
-  S.unsub = api.watchTask(id, (t, rs) => { S.task = t; S.rounds = rs; render(); });
+  let joined = false;
+  S.unsub = api.watchTask(id, (t, rs) => {
+    if(!t){ S.unsub && S.unsub(); S.unsub = null; toast('找不到這個任務（可能已被刪除或網址有誤）', 5000); openTasks(); return; }
+    S.task = t; S.rounds = rs;
+    // 拿到網址的人自動加入成員，之後任務會出現在他的清單
+    if(!joined && !(t.members || []).includes(me.email)){ joined = true; api.join(id).catch(() => {}); }
+    render();
+  });
   render();
 }
 function renderTask(app){
   const t = S.task; setHeader(t.name, true);
-  let tot = 0, put = 0, flags = 0;
-  S.rounds.forEach(r => { const s = roundStat(r); tot += s.total; put += s.put; flags += Object.keys(r.flags || {}).length; });
+  let tot = 0, put = 0, flags = 0, ck = 0, ckt = 0, iss = 0;
+  S.rounds.forEach(r => { const s = roundStat(r), c = checkStat(r); tot += s.total; put += s.put; flags += Object.keys(r.flags || {}).length; ck += c.done; ckt += c.total; iss += c.issues; });
   app.innerHTML = `
-    <div class="card"><div class="muted">${esc(t.project || '')}</div>
-      <div><b>${put}</b> / ${tot} 項已放・${S.rounds.length} 輪${flags ? `・<span class="pill warn">${flags} 筆異動</span>` : ''}</div>
-      <div class="bar"><i style="width:${tot ? put / tot * 100 : 0}%"></i></div></div>
-    <div class="list">${S.rounds.map(r => { const s = roundStat(r), cw = claimWarn(r), nf = Object.keys(r.flags || {}).length;
-      return `<div class="item ${s.done ? 'done' : ''}" data-r="${esc(r.id)}"><div class="main">
+    <div class="card"><div class="muted">${esc(t.project || '')}${t.ship ? '・' + esc(t.ship) : ''}</div>
+      <div>播種 <b>${put}</b>/${tot} 項・檢查 <b>${ck}</b>/${ckt} 籃・${S.rounds.length} 輪${flags ? `・<span class="pill warn">${flags} 筆異動</span>` : ''}${iss ? `・<span class="pill warn">${iss} 籃有問題</span>` : ''}</div>
+      <div class="bar"><i style="width:${tot ? put / tot * 100 : 0}%"></i></div>
+      <div class="bar"><i style="width:${ckt ? ck / ckt * 100 : 0}%;background:var(--steel)"></i></div>
+      <div class="row" style="margin-top:10px"><button class="btn ghost small" id="share">分享任務網址</button></div></div>
+    <div class="list">${S.rounds.map(r => { const s = roundStat(r), c = checkStat(r), nf = Object.keys(r.flags || {}).length, ppl = activePeople(r);
+      return `<div class="item ${c.total && c.done === c.total ? 'done' : ''}" data-r="${esc(r.id)}"><div class="main">
         <div class="t">第 ${r.no} 輪　單序 ${r.seqFrom}–${r.seqTo}</div>
-        <div class="s">${(r.orders || []).length} 籃・${s.put}/${s.total} 項${nf ? `・<span class="pill warn">${nf} 筆異動</span>` : ''}${cw ? `・<span class="pill pri">${esc(cw)}</span>` : (r.claim && !s.done ? `・${esc(r.claim.name || '')}` : '')}</div>
+        <div class="s">${(r.orders || []).length} 籃・播種 ${s.put}/${s.total}・檢查 ${c.done}/${c.total}${nf ? `・<span class="pill warn">${nf} 異動</span>` : ''}${c.issues ? `・<span class="pill warn">${c.issues} 問題</span>` : ''}</div>
+        ${ppl.length ? `<div class="s">👤 ${esc(ppl.join('、'))}</div>` : ''}
         <div class="bar"><i style="width:${s.total ? s.put / s.total * 100 : 0}%"></i></div></div></div>`; }).join('')}</div>
     ${t.createdBy === me.email ? `<div class="card" style="margin-top:12px"><button class="btn ghost" id="closeTask">${t.status === 'closed' ? '重新開啟這個任務' : '結束這個任務'}</button>
-      <p class="muted">結束後指派的人就不會在清單看到（勾「顯示已結束」仍可查看）。</p></div>` : ''}`;
+      <p class="muted">結束後就不會出現在大家的清單（勾「顯示已結束」仍可查看）。</p></div>` : ''}`;
   app.querySelectorAll('[data-r]').forEach(el => el.onclick = () => openRound(el.dataset.r));
+  $('#share').onclick = async () => {
+    const url = location.origin + location.pathname + '?task=' + encodeURIComponent(t.id);
+    try{ if(navigator.share){ await navigator.share({title: t.name, url}); return; } await navigator.clipboard.writeText(url); toast('已複製任務網址'); }
+    catch(e){ prompt('複製這個網址傳給同事：', url); }
+  };
   const ct = $('#closeTask'); if(ct) ct.onclick = async () => {
     const closing = t.status !== 'closed';
     if(closing && !confirm('確定結束這個任務？')) return;
@@ -319,42 +377,61 @@ function renderTask(app){
   };
 }
 
-async function openRound(rid){
-  const r = S.rounds.find(x => x.id === rid); if(!r) return;
-  const cw = claimWarn(r);
-  if(cw && !confirm(`${cw}。\n兩個人可以同時播（進度會同步），確定也要進入？`)) return;
-  S.rid = rid; S.view = 'round';
-  api.updateRound(S.taskId, rid, {claim: {email: me.email, name: me.name, at: Date.now()}}).catch(() => {});
-  render();
+function openRound(rid){
+  if(!S.rounds.some(x => x.id === rid)) return;
+  S.rid = rid; S.view = 'round'; render(); window.scrollTo(0, 0);
+}
+function roundHead(r){
+  const s = roundStat(r), c = checkStat(r), ppl = activePeople(r);
+  return `
+    <div class="sticky">
+      <div class="seg"><button data-m="item" class="${S.mode === 'item' ? 'on' : ''}">播種・商品</button><button data-m="slot" class="${S.mode === 'slot' ? 'on' : ''}">播種・籃子</button><button data-m="check" class="${S.mode === 'check' ? 'on' : ''}">檢查</button></div>
+      <div class="muted">單序 ${r.seqFrom}–${r.seqTo}・播種 ${s.put}/${s.total} 項・檢查 ${c.done}/${c.total} 籃${c.issues ? `・<b style="color:var(--warn)">${c.issues} 籃有問題</b>` : ''}${ppl.length ? `・👤 ${esc(ppl.join('、'))}` : ''}</div>
+      <div class="bar"><i style="width:${S.mode === 'check' ? (c.total ? c.done / c.total * 100 : 0) : (s.total ? s.put / s.total * 100 : 0)}%;${S.mode === 'check' ? 'background:var(--steel)' : ''}"></i></div>
+    </div>`;
 }
 function renderRound(app, r){
   setHeader(`第 ${r.no} 輪`, true);
-  const s = roundStat(r);
-  const head = `
-    <div class="sticky">
-      <div class="seg"><button data-m="item" class="${S.mode === 'item' ? 'on' : ''}">以商品為主</button><button data-m="slot" class="${S.mode === 'slot' ? 'on' : ''}">以籃子為主</button></div>
-      <div class="muted">單序 ${r.seqFrom}–${r.seqTo}・${s.put}/${s.total} 項已放</div>
-      <div class="bar"><i style="width:${s.total ? s.put / s.total * 100 : 0}%"></i></div>
-    </div>
-    ${s.done ? '<div class="banner ok">這一輪全部放完了 👍 託運單照籃號順序放進籃子，再交給包裝核對。</div>' : ''}`;
-  let body;
+  const s = roundStat(r), c = checkStat(r);
+  let body = '';
   if(S.mode === 'item'){
-    body = `<div class="list">${productsOf(r).map(p => `
-      <div class="item ${p.put === p.total ? 'done' : ''}" data-k="${esc(p.key)}"><div class="main"><div class="t">${esc(p.name)}</div>
-      <div class="s">${p.sku ? esc(p.sku) + '・' : ''}${p.total} 籃・共 ${p.units} 件・已放 ${p.put}</div></div>
-      <span class="big" style="font-size:22px">${p.units}</span></div>`).join('')}</div>`;
-  }else{
+    body = (s.done ? '<div class="banner ok">這一輪播種全部放完了 👍 託運單照籃號順序放進籃子，再切到「檢查」核對。</div>' : '')
+      + `<p class="muted" style="margin:0 0 8px">一人負責一種商品：點進商品按「我負責」，大家就看得到誰在放什麼。</p>`
+      + `<div class="list">${productsOf(r).map(p => { const ow = ownerOf(r, p.key);
+        return `<div class="item ${p.put === p.total ? 'done' : ''}" data-k="${esc(p.key)}"><div class="main"><div class="t">${esc(p.name)}</div>
+        <div class="s">${p.sku ? esc(p.sku) + '・' : ''}${p.total} 籃・共 ${p.units} 件・已放 ${p.put}</div>
+        ${ow ? `<div class="s"><span class="pill ${ow.email === me.email ? 'ok' : 'pri'}">👤 ${esc(ow.email === me.email ? '我負責' : ow.name)}</span></div>` : ''}</div>
+        <span class="big" style="font-size:22px">${p.units}</span></div>`; }).join('')}</div>`;
+  }else if(S.mode === 'slot'){
     body = gridHtml(r, slot => {
       const o = r.orders.find(x => x.slot === slot); if(!o) return {cls:'empty', q:''};
       const n = o.items.length, put = o.items.filter(it => (r.placed || {})[pkey(slot, it.k)]).length;
-      if(isCancel(r, slot)) return {cls:'cancel', q:'取消', tag:''};
+      if(isCancel(r, slot)) return {cls:'cancel', q:'取消'};
       return {cls: put === n ? 'put' : 'need', q: put === n ? '✓' : `${n - put}`, tag: put === n ? '' : '項', pri: isPri(r, slot), click:true};
     });
+  }else{
+    const iss = (r.orders || []).filter(o => issueOf(r, o.slot) && !isCancel(r, o.slot));
+    body = (c.total && c.done === c.total ? '<div class="banner ok">這一輪全部檢查完了，可以包裝 👍</div>' : '')
+      + `<button class="btn sec" id="findBtn" style="margin-bottom:10px">🔍 找籃子（不知道這籃是誰的）</button>`
+      + (iss.length ? `<div class="card" style="border-color:var(--warn)"><b style="color:var(--warn)">有問題的籃子</b>${iss.map(o => { const x = issueOf(r, o.slot);
+          return `<div class="item" data-cs="${o.slot}" style="margin-top:6px"><div class="main"><div class="t">${o.slot} 號籃・${esc(o.name)}</div><div class="s">${esc(ISSUE[x.type] || x.type)}${x.note ? '：' + esc(x.note) : ''}・${esc(x.byName || x.by)} ${fmtTime(x.at)}</div></div></div>`; }).join('')}</div>` : '')
+      + `<p class="muted" style="margin:0 0 8px">灰色＝還沒檢查、黃色＝檢查到一半、綠色＝可包裝、紅色＝有問題。點籃子開始核對。</p>`
+      + gridHtml(r, slot => {
+        const o = r.orders.find(x => x.slot === slot); if(!o) return {cls:'empty', q:''};
+        const b = basketCheck(r, o);
+        if(b.cancel) return {cls:'cancel', q:'取消', click:true};
+        if(b.issue) return {cls:'issue', q:'問題', click:true};
+        if(b.done) return {cls:'put', q:'✓', tag:'可包裝', click:true};
+        if(b.c) return {cls:'need', q:`${b.c}/${b.n}`, click:true};
+        return {cls:'todo', q:'', tag:'待檢', pri: isPri(r, slot), click:true};
+      });
   }
-  app.innerHTML = head + body;
+  app.innerHTML = roundHead(r) + body;
   app.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { S.mode = b.dataset.m; render(); });
-  app.querySelectorAll('[data-k]').forEach(el => el.onclick = () => { S.itemKey = el.dataset.k; S.view = 'item'; render(); window.scrollTo(0, 0); });
-  app.querySelectorAll('.cell[data-slot]').forEach(el => el.onclick = () => { S.slot = Number(el.dataset.slot); S.view = 'slot'; render(); window.scrollTo(0, 0); });
+  app.querySelectorAll('[data-k]').forEach(el => el.onclick = () => openItem(r, el.dataset.k));
+  app.querySelectorAll('.cell[data-slot]').forEach(el => el.onclick = () => { S.slot = Number(el.dataset.slot); S.view = S.mode === 'check' ? 'check' : 'slot'; render(); window.scrollTo(0, 0); });
+  app.querySelectorAll('[data-cs]').forEach(el => el.onclick = () => { S.slot = Number(el.dataset.cs); S.view = 'check'; render(); window.scrollTo(0, 0); });
+  const fb = $('#findBtn'); if(fb) fb.onclick = () => openFindSheet();
 }
 // 層架圖：A 面、B 面各 5×5
 function gridHtml(r, cellOf){
@@ -371,15 +448,22 @@ function gridHtml(r, cellOf){
   }).join('');
 }
 
+function openItem(r, key){
+  const ow = ownerOf(r, key);
+  if(ow && ow.email !== me.email && !S.warned[r.id + key]){ S.warned[r.id + key] = 1; toast(`${ow.name} 負責這個商品中，可以一起放`, 3000); }
+  S.itemKey = key; S.view = 'item'; render(); window.scrollTo(0, 0);
+}
 function renderItem(app, r){
   const p = productsOf(r).find(x => x.key === S.itemKey);
   if(!p){ S.view = 'round'; return renderRound(app, r); }
   setHeader(`第 ${r.no} 輪・商品`, true);
   const needMap = new Map(p.need.map(n => [n.slot, n]));
-  const left = p.total - p.put;
+  const left = p.total - p.put, ow = ownerOf(r, p.key), mine = ow && ow.email === me.email;
   app.innerHTML = `
     <div class="sticky"><div class="big">${esc(p.name)}</div>
-      <div class="muted">${p.sku ? esc(p.sku) + '・' : ''}共 ${p.units} 件・${left ? `還有 <b>${left}</b> 籃要放` : '這個商品放完了'}</div></div>
+      <div class="muted">${p.sku ? esc(p.sku) + '・' : ''}共 ${p.units} 件・${left ? `還有 <b>${left}</b> 籃要放` : '這個商品放完了'}</div>
+      <div class="row" style="margin-top:6px"><span class="muted">${ow ? `👤 ${esc(mine ? '我負責' : ow.name + ' 負責中')}` : '還沒有人負責'}</span>
+        <button class="btn ${mine ? 'ghost' : ''} small" id="own" style="flex:none">${mine ? '取消負責' : (ow ? '改成我負責' : '我負責')}</button></div></div>
     <p class="muted" style="margin:0 0 8px">黃色格子＝要放，格子上的數字是件數；放好點一下變綠色，點錯再點一下取消。</p>
     ${gridHtml(r, slot => {
       const n = needMap.get(slot); if(!n) return {cls:'', q:''};
@@ -388,41 +472,156 @@ function renderItem(app, r){
       return {cls: put ? 'put' : 'need', q: put ? '✓' : `×${n.qty}`, pri: isPri(r, slot), click:true};
     })}
     <div class="navrow"><button class="btn ghost" id="toList">商品清單</button>${left ? '' : '<button class="btn" id="nextItem">下一個商品</button>'}</div>`;
+  $('#own').onclick = () => {
+    api.updateRound(S.taskId, r.id, {[`owners.${hk(p.key)}`]: mine ? null : {email: me.email, name: me.name, at: Date.now(), item: p.name}}).catch(e => toast('儲存失敗：' + e.message, 4000));
+    buzz();
+  };
   app.querySelectorAll('.cell[data-slot]').forEach(el => el.onclick = () => {
     const slot = Number(el.dataset.slot), n = needMap.get(slot); if(!n || isCancel(r, slot)) return;
     const k = pkey(slot, n.k), on = !(r.placed || {})[k];
     buzz(on ? 30 : [20, 40, 20]);
-    api.updateRound(S.taskId, r.id, {[`placed.${k}`]: on ? {by: me.email, at: Date.now()} : null, claim: {email: me.email, name: me.name, at: Date.now()}}).catch(e => toast('儲存失敗：' + e.message, 4000));
+    api.updateRound(S.taskId, r.id, {[`placed.${k}`]: on ? stamp() : null}).catch(e => toast('儲存失敗：' + e.message, 4000));
     if(on && isPri(r, slot)) toast(`第 ${slot} 籃是優先處理`);
   });
   $('#toList').onclick = () => { S.view = 'round'; render(); };
-  const nx = $('#nextItem'); if(nx) nx.onclick = () => { const q = productsOf(r).find(x => x.put < x.total); if(q){ S.itemKey = q.key; render(); window.scrollTo(0, 0); } else { S.view = 'round'; render(); } };
+  // 下一個商品：優先挑沒人負責、還沒放完的
+  const nx = $('#nextItem'); if(nx) nx.onclick = () => {
+    const rest = productsOf(r).filter(x => x.put < x.total), q = rest.find(x => !ownerOf(r, x.key)) || rest[0];
+    if(q) openItem(r, q.key); else { S.view = 'round'; render(); }
+  };
 }
 
+function slotHeader(r, o, big){
+  const f = flagOf(r, o.slot);
+  return `<div class="sticky"><div class="row" style="align-items:baseline"><div class="big" style="font-size:40px;flex:none">${o.slot} 號籃</div><div class="muted">${posText(o.slot)}</div></div>
+      ${big ? `<div class="who"><div class="nm">${esc(o.name)}</div><div>訂單 <b>${esc(o.id)}</b></div><div>單序 <b>${o.seq}</b>・末三碼 <b>${esc(o.p3)}</b>${S.task.ship ? '・' + esc(S.task.ship) : ''}</div></div>`
+        : `<div class="muted">單序 ${o.seq}・${esc(o.name)}（末三碼 ${esc(o.p3)}）・${esc(o.id)}</div>`}
+      ${o.note ? `<div class="banner note">備註：${esc(o.note)}</div>` : ''}</div>
+    ${isCancel(r, o.slot) ? `<div class="banner cancel">已取消，不要放，已放的退回上架</div>` : ''}
+    ${f && f.type === 'priority' ? `<div class="banner pri">優先處理</div>` : ''}
+    ${f ? `<p class="muted" style="margin-top:-4px">${esc(f.byName || f.by)} 標記於 ${fmtTime(f.at)}</p>` : ''}`;
+}
+function slotNav(r, o, filter, word = ''){
+  const slots = r.orders.filter(filter || (() => true)).map(x => x.slot).sort((a,b) => a - b);
+  const prev = slots.filter(s => s < o.slot).at(-1), next = slots.find(s => s > o.slot);
+  return {html: `<div class="navrow"><button class="btn ghost" id="prev" ${prev ? '' : 'disabled'}>‹ ${prev ? `${word}${prev} 號` : ''}</button><button class="btn ghost" id="next" ${next ? '' : 'disabled'}>${next ? `${word}${next} 號` : (word ? '沒有待檢了' : '')} ›</button></div>`, prev, next};
+}
+function bindNav(nav){
+  $('#prev').onclick = () => { if(nav.prev){ S.slot = nav.prev; render(); window.scrollTo(0, 0); } };
+  $('#next').onclick = () => { if(nav.next){ S.slot = nav.next; render(); window.scrollTo(0, 0); } };
+}
 function renderSlot(app, r){
   const o = r.orders.find(x => x.slot === S.slot);
   if(!o){ S.view = 'round'; return renderRound(app, r); }
-  setHeader(`第 ${r.no} 輪・籃子`, true);
-  const f = flagOf(r, o.slot), cancel = isCancel(r, o.slot);
-  const face = faceOf(o.slot), idx = (o.slot - 1) % PER_FACE;
-  const slots = r.orders.map(x => x.slot).sort((a,b) => a - b), i = slots.indexOf(o.slot);
-  app.innerHTML = `
-    <div class="sticky"><div class="big" style="font-size:40px">${o.slot} 號籃</div>
-      <div class="muted">${face} 面第 ${Math.floor(idx / COLS) + 1} 層第 ${idx % COLS + 1} 格・單序 ${o.seq}・${esc(o.name)}（末三碼 ${esc(o.p3)}）・${esc(o.id)}</div></div>
-    ${cancel ? `<div class="banner cancel">已取消，不要放，已放的退回上架</div>` : ''}
-    ${f && f.type === 'priority' ? `<div class="banner pri">優先處理</div>` : ''}
-    ${f ? `<p class="muted" style="margin-top:-4px">${esc(f.byName || f.by)} 標記於 ${fmtTime(f.at)}</p>` : ''}
+  setHeader(`第 ${r.no} 輪・播種`, true);
+  const cancel = isCancel(r, o.slot), nav = slotNav(r, o);
+  app.innerHTML = slotHeader(r, o, false) + `
     <ul class="lines">${o.items.map(it => { const put = !!(r.placed || {})[pkey(o.slot, it.k)];
-      return `<li class="${put ? 'put' : ''}" data-k="${it.k}"><span class="ck">${put ? '✓' : ''}</span><span class="n">${esc(it.name)}${it.sku ? `<br><span class="muted">${esc(it.sku)}</span>` : ''}</span><span class="q">×${esc(it.qty)}</span></li>`; }).join('')}</ul>
-    <div class="navrow"><button class="btn ghost" id="prev" ${i <= 0 ? 'disabled' : ''}>‹ ${i > 0 ? slots[i-1] + ' 號' : ''}</button><button class="btn ghost" id="next" ${i >= slots.length - 1 ? 'disabled' : ''}>${i < slots.length - 1 ? slots[i+1] + ' 號' : ''} ›</button></div>`;
+      return `<li class="${put ? 'put' : ''}" data-k="${it.k}"><span class="ck">${put ? '✓' : ''}</span><span class="n">${esc(it.name)}${it.sku ? `<br><span class="muted">${esc(it.sku)}</span>` : ''}</span><span class="q">×${esc(it.qty)}</span></li>`; }).join('')}</ul>` + nav.html;
   app.querySelectorAll('.lines li').forEach(el => el.onclick = () => {
     if(cancel) return toast('這張單已取消');
     const k = pkey(o.slot, el.dataset.k), on = !(r.placed || {})[k];
     buzz(on ? 30 : [20, 40, 20]);
-    api.updateRound(S.taskId, r.id, {[`placed.${k}`]: on ? {by: me.email, at: Date.now()} : null, claim: {email: me.email, name: me.name, at: Date.now()}}).catch(e => toast('儲存失敗：' + e.message, 4000));
+    api.updateRound(S.taskId, r.id, {[`placed.${k}`]: on ? stamp() : null}).catch(e => toast('儲存失敗：' + e.message, 4000));
   });
-  $('#prev').onclick = () => { if(i > 0){ S.slot = slots[i-1]; render(); } };
-  $('#next').onclick = () => { if(i < slots.length - 1){ S.slot = slots[i+1]; render(); } };
+  bindNav(nav);
+}
+
+/* ================= 檢查：逐籃核對，跟播種分開記錄 ================= */
+function renderCheck(app, r){
+  const o = r.orders.find(x => x.slot === S.slot);
+  if(!o){ S.view = 'round'; return renderRound(app, r); }
+  setHeader(`第 ${r.no} 輪・檢查`, true);
+  const b = basketCheck(r, o), x = b.issue;
+  // 下一籃：跳到還沒檢查完的
+  const nav = slotNav(r, o, q => !isCancel(r, q.slot) && !basketCheck(r, q).done, '待檢 ');
+  const lastBy = Object.entries(r.checked || {}).filter(([k]) => k.startsWith(o.slot + '_')).map(([, v]) => v).sort((a,c) => c.at - a.at)[0];
+  app.innerHTML = slotHeader(r, o, true)
+    + (x ? `<div class="banner cancel" style="font-size:16px">有問題：${esc(ISSUE[x.type] || x.type)}${x.note ? '：' + esc(x.note) : ''}<br><span style="font-weight:400;font-size:13px">${esc(x.byName || x.by)} ${fmtTime(x.at)}</span></div>` : '')
+    + (b.done && !x ? `<div class="banner ok">核對完成，可以包裝${lastBy ? `（${esc(lastBy.byName || lastBy.by)} ${fmtTime(lastBy.at)}）` : ''}</div>` : '')
+    + `<p class="muted" style="margin:0 0 8px">籃子裡的商品對上一項就點一下劃掉。</p>
+    <ul class="lines">${o.items.map(it => { const ck = (r.checked || {})[pkey(o.slot, it.k)];
+      return `<li class="${ck ? 'put chk' : ''}" data-k="${it.k}"><span class="ck">${ck ? '✓' : ''}</span><span class="n">${esc(it.name)}${it.sku ? `<br><span class="muted">${esc(it.sku)}</span>` : ''}</span><span class="q">×${esc(it.qty)}</span></li>`; }).join('')}</ul>
+    <div class="row" style="margin-top:12px">${x ? '<button class="btn" id="solve">問題已解決</button>' : '<button class="btn danger" id="issue">有問題</button>'}<button class="btn sec" id="findBtn">🔍 找籃子</button></div>`
+    + nav.html;
+  app.querySelectorAll('.lines li').forEach(el => el.onclick = () => {
+    if(b.cancel) return toast('這張單已取消');
+    const k = pkey(o.slot, el.dataset.k), on = !(r.checked || {})[k];
+    buzz(on ? 30 : [20, 40, 20]);
+    const willDone = on && o.items.every(it => String(it.k) === el.dataset.k || (r.checked || {})[pkey(o.slot, it.k)]);
+    api.updateRound(S.taskId, r.id, {[`checked.${k}`]: on ? stamp() : null}).catch(e => toast('儲存失敗：' + e.message, 4000));
+    if(willDone && !x){ buzz([40, 60, 40]); toast(`${o.slot} 號籃核對完成`); }
+  });
+  const ib = $('#issue'); if(ib) ib.onclick = () => openIssueSheet(r, o);
+  const sb = $('#solve'); if(sb) sb.onclick = async () => {
+    if(!confirm('確定問題已處理好？')) return;
+    await api.updateRound(S.taskId, r.id, {[`issues.${o.slot}`]: null});
+    api.addLog(S.taskId, {action:'issueSolved', round:r.no, slot:o.slot, seq:o.seq, orderId:o.id, issue:x}).catch(() => {});
+    toast('已標記解決');
+  };
+  $('#findBtn').onclick = () => openFindSheet();
+  bindNav(nav);
+}
+function openIssueSheet(r, o){
+  const m = $('#modal'), sh = $('#sheet'); m.hidden = false;
+  sh.innerHTML = `<div class="row" style="margin-bottom:10px"><b style="font-size:18px">${o.slot} 號籃有問題</b><button class="btn ghost small" id="mClose" style="flex:none">關閉</button></div>
+    <div class="seg" id="itype">${Object.entries(ISSUE).map(([k, v], i) => `<button data-t="${k}" class="${i ? '' : 'on'}">${v}</button>`).join('')}</div>
+    <input class="search" id="inote" placeholder="說明（例如：少一條毛巾）" autocomplete="off">
+    <button class="btn danger" id="isave" style="margin-top:10px">標記有問題</button>`;
+  let type = 'short';
+  sh.querySelectorAll('#itype button').forEach(bt => bt.onclick = () => { type = bt.dataset.t; sh.querySelectorAll('#itype button').forEach(x => x.classList.toggle('on', x === bt)); });
+  $('#isave').onclick = async () => {
+    const note = $('#inote').value.trim();
+    try{
+      await api.updateRound(S.taskId, r.id, {[`issues.${o.slot}`]: {type, note, ...stamp()}});
+      api.addLog(S.taskId, {action:'issue', type, note, round:r.no, slot:o.slot, seq:o.seq, orderId:o.id}).catch(() => {});
+      m.hidden = true; toast('已標記，回到這一輪的「檢查」可以看到'); buzz(60);
+    }catch(e){ toast('儲存失敗：' + e.message, 4000); }
+  };
+  $('#mClose').onclick = () => { m.hidden = true; };
+}
+
+/* ================= 找籃子：用託運單資訊或商品組合反查 ================= */
+function openFindSheet(){
+  const m = $('#modal'), sh = $('#sheet'); m.hidden = false;
+  const F = {scope: 'round', picked: new Set(), q: ''};
+  const scopeRounds = () => F.scope === 'round' && round() ? [round()] : S.rounds;
+  const draw = () => {
+    const rs = scopeRounds();
+    const prods = new Map();
+    rs.forEach(r => (r.orders || []).forEach(o => { if(isCancel(r, o.slot)) return; o.items.forEach(it => { const k = itemKeyOf(it); if(!prods.has(k)) prods.set(k, {k, name: it.name, n: 0}); prods.get(k).n++; }); }));
+    const plist = [...prods.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant'));
+    const v = F.q.toLowerCase(), C = F.picked;
+    const hits = [];
+    if(v || C.size) rs.forEach(r => (r.orders || []).forEach(o => {
+      if(isCancel(r, o.slot)) return;
+      if(v && !(String(o.id).toLowerCase().includes(v) || String(o.name).toLowerCase().includes(v) || o.p3 === v || String(o.seq) === v)) return;
+      const O = new Set(o.items.map(itemKeyOf));
+      if(C.size && ![...C].every(k => O.has(k))) return;
+      const exact = C.size ? O.size === C.size : true, b = basketCheck(r, o);
+      hits.push({r, o, exact, b, rank: (b.done && !b.issue ? 2 : 0) + (exact ? 0 : 1)});
+    }));
+    hits.sort((a, b) => a.rank - b.rank || a.r.no - b.r.no || a.o.slot - b.o.slot);
+    sh.innerHTML = `<div class="row" style="margin-bottom:10px"><b style="font-size:18px">找籃子</b><button class="btn ghost small" id="mClose" style="flex:none">關閉</button></div>
+      <div class="seg"><button data-s="round" class="${F.scope === 'round' ? 'on' : ''}" ${round() ? '' : 'disabled'}>這一輪</button><button data-s="task" class="${F.scope === 'task' ? 'on' : ''}">整個任務</button></div>
+      <input class="search" id="fq" placeholder="託運單上的姓名、訂單編號、末三碼或單序" autocomplete="off" value="${esc(F.q)}">
+      <div class="muted" style="margin:10px 0 4px">或點選籃子裡看到的商品（只列${F.scope === 'round' ? '這一輪' : '這個任務'}出現的）：</div>
+      <div class="chips">${plist.map(p => `<button class="chip ${C.has(p.k) ? 'on' : ''}" data-p="${esc(p.k)}">${esc(p.name)}</button>`).join('')}</div>
+      ${C.size ? `<button class="btn ghost small" id="fclear" style="margin-top:6px">清除商品選擇</button>` : ''}
+      <div class="muted" style="margin:12px 0 6px">${v || C.size ? `找到 ${hits.length} 籃${C.size ? `（完全符合 ${hits.filter(h => h.exact).length}）` : ''}，已檢查過的排在最後` : '輸入或點選商品後會列出候選籃子'}</div>
+      <div class="list">${hits.slice(0, 40).map((h, i) => `<div class="item ${h.b.done && !h.b.issue ? 'done' : ''}" data-h="${i}"><div class="main">
+        <div class="t">${F.scope === 'task' ? `第 ${h.r.no} 輪 ` : ''}${h.o.slot} 號籃・${esc(h.o.name)}</div>
+        <div class="s">單序 ${h.o.seq}・${esc(h.o.id)}・末三碼 ${esc(h.o.p3)}</div>
+        <div class="s">${h.o.items.map(it => esc(it.name) + '×' + esc(it.qty)).join('、')}</div>
+        <div class="s">${C.size ? `<span class="pill ${h.exact ? 'ok' : ''}">${h.exact ? '完全符合' : '還有其他商品'}</span> ` : ''}${h.b.issue ? '<span class="pill warn">有問題</span>' : h.b.done ? '<span class="pill">已檢查</span>' : h.b.c ? `<span class="pill pri">檢查中 ${h.b.c}/${h.b.n}</span>` : ''}</div></div></div>`).join('')}</div>`;
+    sh.querySelectorAll('[data-s]').forEach(bt => bt.onclick = () => { F.scope = bt.dataset.s; draw(); });
+    const fq = $('#fq'); fq.oninput = () => { F.q = fq.value.trim(); const pos = fq.selectionStart; draw(); const n = $('#fq'); n.focus(); n.setSelectionRange(pos, pos); };
+    sh.querySelectorAll('[data-p]').forEach(bt => bt.onclick = () => { const k = bt.dataset.p; C.has(k) ? C.delete(k) : C.add(k); draw(); });
+    const fc = $('#fclear'); if(fc) fc.onclick = () => { C.clear(); draw(); };
+    sh.querySelectorAll('[data-h]').forEach(el => el.onclick = () => { const h = hits[Number(el.dataset.h)]; m.hidden = true; S.rid = h.r.id; S.mode = 'check'; S.slot = h.o.slot; S.view = 'check'; render(); window.scrollTo(0, 0); });
+    $('#mClose').onclick = () => { m.hidden = true; };
+  };
+  draw(); $('#fq').focus();
 }
 
 /* ================= 異動：取消／優先 ================= */
@@ -451,8 +650,8 @@ function openFlagSheet(){
       const label = {cancel:'取消', priority:'優先處理', clear:'清除標記'}[t];
       if(t === 'cancel' && !confirm(`確定把第 ${r.no} 輪 ${o.slot} 號籃（${o.name}）標記為取消？\n\n提醒：請同時到 shipment.html 和 SG 取消這張單。`)) return;
       try{
-        await api.updateRound(S.taskId, r.id, {[`flags.${o.slot}`]: t === 'clear' ? null : {type:t, by:me.email, byName:me.name, at:Date.now()}});
-        await api.addLog(S.taskId, {action:t, round:r.no, slot:o.slot, seq:o.seq, orderId:o.id});
+        await api.updateRound(S.taskId, r.id, {[`flags.${o.slot}`]: t === 'clear' ? null : {type:t, ...stamp()}});
+        api.addLog(S.taskId, {action:t, round:r.no, slot:o.slot, seq:o.seq, orderId:o.id}).catch(() => {});
         toast(`第 ${r.no} 輪 ${o.slot} 號籃：${label}`); buzz(60);
       }catch(e){ toast('儲存失敗：' + e.message, 4000); }
       setTimeout(run, 50);
