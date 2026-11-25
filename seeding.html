@@ -124,7 +124,7 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
    籃號：A 面 1～25、B 面 26～50，每面 5 層 × 5 格，從最上層左邊開始往右、再往下。
    任何在 Hub 使用者名單裡的人，拿到任務網址（?task=）都能加入；被指派只決定任務會不會出現在清單。
    ?demo=1 用假資料，不連 Firestore（測試畫面用）。 */
-const SEED_VERSION = '2026-11-25-2';
+const SEED_VERSION = '2026-11-25-3';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DEMO = new URLSearchParams(location.search).has('demo');
@@ -358,7 +358,7 @@ function renderTask(app){
       <div class="row" style="margin-top:10px"><button class="btn ghost small" id="share">分享任務網址</button></div></div>
     <div class="list">${S.rounds.map(r => { const s = roundStat(r), c = checkStat(r), nf = Object.keys(r.flags || {}).length, ppl = activePeople(r);
       return `<div class="item ${c.total && c.done === c.total ? 'done' : ''}" data-r="${esc(r.id)}"><div class="main">
-        <div class="t">第 ${r.no} 輪　單序 ${r.seqFrom}–${r.seqTo}</div>
+        <div class="t">第 ${r.no} 輪${r.sheet ? '・' + esc(r.sheet) : ''}　單序 ${r.seqFrom}–${r.seqTo}</div>
         <div class="s">${(r.orders || []).length} 籃・播種 ${s.put}/${s.total}・檢查 ${c.done}/${c.total}${nf ? `・<span class="pill warn">${nf} 異動</span>` : ''}${c.issues ? `・<span class="pill warn">${c.issues} 問題</span>` : ''}</div>
         ${ppl.length ? `<div class="s">👤 ${esc(ppl.join('、'))}</div>` : ''}
         <div class="bar"><i style="width:${s.total ? s.put / s.total * 100 : 0}%"></i></div></div></div>`; }).join('')}</div>
@@ -386,7 +386,7 @@ function roundHead(r){
   return `
     <div class="sticky">
       <div class="seg"><button data-m="item" class="${S.mode === 'item' ? 'on' : ''}">播種・商品</button><button data-m="slot" class="${S.mode === 'slot' ? 'on' : ''}">播種・籃子</button><button data-m="check" class="${S.mode === 'check' ? 'on' : ''}">檢查</button></div>
-      <div class="muted">單序 ${r.seqFrom}–${r.seqTo}・播種 ${s.put}/${s.total} 項・檢查 ${c.done}/${c.total} 籃${c.issues ? `・<b style="color:var(--warn)">${c.issues} 籃有問題</b>` : ''}${ppl.length ? `・👤 ${esc(ppl.join('、'))}` : ''}</div>
+      <div class="muted">${r.sheet ? esc(r.sheet) + '・' : ''}單序 ${r.seqFrom}–${r.seqTo}・播種 ${s.put}/${s.total} 項・檢查 ${c.done}/${c.total} 籃${c.issues ? `・<b style="color:var(--warn)">${c.issues} 籃有問題</b>` : ''}${ppl.length ? `・👤 ${esc(ppl.join('、'))}` : ''}</div>
       <div class="bar"><i style="width:${S.mode === 'check' ? (c.total ? c.done / c.total * 100 : 0) : (s.total ? s.put / s.total * 100 : 0)}%;${S.mode === 'check' ? 'background:var(--steel)' : ''}"></i></div>
     </div>`;
 }
