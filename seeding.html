@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1c2630">
+<title>播種配貨</title>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<style>
+:root{--ink:#1c2630;--steel:#3b5670;--soft:#dfe6ec;--paper:#f3f5f7;--card:#fff;--line:#c8d1d9;--tape:#f2c230;--tape-ink:#231c00;
+  --ok:#2f7d4f;--ok-bg:#dff2e6;--warn:#b0421c;--warn-bg:#fbeee8;--pri:#c26a00;--pri-bg:#fff1d6;--mute:#5b6b79}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0}
+[hidden]{display:none!important}
+body{background:var(--paper);color:var(--ink);font:16px/1.5 "Noto Sans TC","Microsoft JhengHei","PingFang TC",sans-serif;padding-bottom:env(safe-area-inset-bottom)}
+button,input{font:inherit;color:inherit}
+header{position:sticky;top:0;z-index:20;background:var(--ink);color:#fff;display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:5px solid transparent;
+  border-image:repeating-linear-gradient(-45deg,var(--tape) 0 12px,var(--ink) 12px 24px) 5}
+header h1{margin:0;font-size:17px;font-weight:900;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+header button{background:transparent;border:1px solid #5f7488;color:#fff;border-radius:8px;padding:5px 10px;font-size:14px;cursor:pointer}
+#ver{font-size:11px;opacity:.6}
+main{max-width:720px;margin:0 auto;padding:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:10px}
+.btn{display:block;width:100%;border:0;border-radius:10px;padding:14px;font-weight:700;font-size:17px;cursor:pointer;background:var(--tape);color:var(--tape-ink);text-align:center}
+.btn.sec{background:var(--steel);color:#fff}
+.btn.ghost{background:#fff;border:1px solid var(--line);color:var(--ink)}
+.btn.danger{background:var(--warn);color:#fff}
+.btn.small{display:inline-block;width:auto;padding:7px 12px;font-size:14px}
+.muted{color:var(--mute);font-size:13px}
+.row{display:flex;gap:8px;align-items:center}
+.row>*{flex:1}
+.list{display:flex;flex-direction:column;gap:8px}
+.item{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;cursor:pointer;display:flex;align-items:center;gap:12px}
+.item:active{background:var(--soft)}
+.item .main{flex:1;min-width:0}
+.item .t{font-weight:700;font-size:17px;word-break:break-all}
+.item .s{font-size:13px;color:var(--mute)}
+.item.done{opacity:.55}
+.item.done .t::after{content:' ✓';color:var(--ok)}
+.pill{display:inline-block;border-radius:10px;padding:0 8px;font-size:12px;font-weight:700;background:var(--soft);color:var(--steel)}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}
+.pill.warn{background:var(--warn-bg);color:var(--warn)}
+.pill.pri{background:var(--pri-bg);color:var(--pri)}
+.bar{height:6px;background:var(--soft);border-radius:3px;overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;background:var(--ok)}
+.seg{display:flex;background:var(--soft);border-radius:10px;padding:3px;margin-bottom:10px}
+.seg button{flex:1;border:0;background:transparent;border-radius:8px;padding:8px;font-weight:700;font-size:15px;cursor:pointer;color:var(--steel)}
+.seg button.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.big{font-size:26px;font-weight:900;line-height:1.25;word-break:break-all}
+.sticky{position:sticky;top:52px;z-index:10;background:var(--paper);padding:6px 0 8px}
+/* 層架圖：一面 5 層 × 5 格，從上層左邊開始編號 */
+.face{margin-bottom:12px}
+.face h3{margin:0 0 4px;font-size:14px;color:var(--steel)}
+.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}
+.cell{position:relative;aspect-ratio:1/1;border-radius:8px;border:2px solid var(--line);background:#e9edf1;color:#9aa7b3;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  font-weight:700;user-select:none;cursor:default;min-height:52px}
+.cell .no{position:absolute;top:2px;left:5px;font-size:11px}
+.cell .q{font-size:24px;line-height:1}
+.cell.need{background:var(--tape);border-color:#c99a00;color:var(--tape-ink);cursor:pointer;box-shadow:0 2px 0 #c99a00}
+.cell.need .no{color:var(--tape-ink)}
+.cell.put{background:var(--ok-bg);border-color:var(--ok);color:var(--ok);cursor:pointer}
+.cell.cancel{background:repeating-linear-gradient(-45deg,var(--warn-bg) 0 6px,#f6d5c8 6px 12px);border-color:var(--warn);color:var(--warn)}
+.cell.pri{outline:3px solid var(--pri);outline-offset:-1px}
+.cell .tag{font-size:10px;line-height:1}
+.cell.empty{background:#f6f7f8;border-style:dashed}
+.lines{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.lines li{display:flex;align-items:center;gap:12px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px;cursor:pointer;font-size:18px}
+.lines li .q{font-size:24px;font-weight:900;min-width:52px;text-align:right}
+.lines li .n{flex:1;word-break:break-all}
+.lines li .ck{width:30px;height:30px;border-radius:50%;border:2px solid var(--line);flex:none;display:flex;align-items:center;justify-content:center;font-weight:900}
+.lines li.put{background:var(--ok-bg);border-color:var(--ok)}
+.lines li.put .ck{background:var(--ok);border-color:var(--ok);color:#fff}
+.banner{border-radius:10px;padding:10px 14px;margin-bottom:10px;font-weight:700}
+.banner.cancel{background:var(--warn);color:#fff;font-size:20px}
+.banner.pri{background:var(--pri-bg);color:var(--pri);border:2px solid var(--pri)}
+.banner.info{background:var(--soft);color:var(--steel)}
+.banner.ok{background:var(--ok-bg);color:var(--ok)}
+.navrow{display:flex;gap:8px;margin-top:12px}
+.navrow .btn{flex:1}
+input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;font-size:17px;background:#fff}
+.modal{position:fixed;inset:0;background:rgba(20,28,36,.55);z-index:50;display:flex;align-items:flex-end;justify-content:center}
+.modal .sheet{background:var(--paper);width:100%;max-width:720px;max-height:88vh;overflow:auto;border-radius:16px 16px 0 0;padding:16px 14px calc(16px + env(safe-area-inset-bottom))}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:10px 16px;border-radius:20px;z-index:60;font-size:15px;max-width:90vw;text-align:center}
+#net{position:fixed;top:0;left:0;right:0;z-index:80;background:#b45309;color:#fff;text-align:center;font-size:13px;padding:3px}
+</style>
+</head>
+<body>
+<div id="net" hidden>離線中：操作會先存在手機，連線後自動同步</div>
+<header>
+  <button id="backBtn" hidden aria-label="返回">‹ 返回</button>
+  <h1 id="title">播種配貨</h1>
+  <span id="ver"></span>
+  <button id="flagBtn" hidden>異動</button>
+</header>
+<main id="app"></main>
+<div id="modal" class="modal" hidden><div class="sheet" id="sheet"></div></div>
+<div id="toast" class="toast" hidden></div>
+
+<script>
+/* 播種配貨（手機）
+   資料：Firestore ezfun-warehouse-billing
+     seeding_tasks/{taskId}            任務：name、project、createdBy、assignees[]、assigneeNames{}、status、rounds、orders
+     seeding_tasks/{taskId}/rounds/{r} 每輪（最多 50 籃）：orders[{slot,seq,id,name,p3,items[{k,name,sku,qty}]}]
+                                        placed{ "籃號_第幾項": {by,at} }、flags{ 籃號: {type:'cancel'|'priority',by,at} }、claim{email,name,at}、doneAt
+     seeding_tasks/{taskId}/log        取消／優先等異動紀錄
+   籃號：A 面 1～25、B 面 26～50，每面 5 層 × 5 格，從最上層左邊開始往右、再往下。
+   ?demo=1 用假資料，不連 Firestore（測試畫面用）。 */
+const SEED_VERSION = '2026-11-25-1';
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const DEMO = new URLSearchParams(location.search).has('demo');
+const SLOTS = 50, PER_FACE = 25, COLS = 5;
+$('#ver').textContent = 'v' + SEED_VERSION + (DEMO ? ' 測試' : '');
+
+function toast(msg, ms = 2200){ const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.h); toast.h = setTimeout(() => t.hidden = true, ms); }
+function buzz(ms = 30){ try{ navigator.vibrate && navigator.vibrate(ms); }catch(e){} }
+const fmtTime = ms => { const d = new Date(ms); return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+
+/* ================= 資料層：Firestore 或測試假資料 ================= */
+let me = null;   // {email, name}
+const api = DEMO ? demoApi() : fireApi();
+
+function fireApi(){
+  firebase.initializeApp({
+    apiKey: "AIzaSyBmb_51Pq-QatHwKkcrNlKw0B6e8YmKAsw",
+    authDomain: "ezfun-warehouse-billing.firebaseapp.com",
+    projectId: "ezfun-warehouse-billing",
+    storageBucket: "ezfun-warehouse-billing.firebasestorage.app",
+    messagingSenderId: "175590672953",
+    appId: "1:175590672953:web:6304ddce7b45b191529be8"
+  });
+  const auth = firebase.auth(), db = firebase.firestore(), FV = firebase.firestore.FieldValue;
+  db.enablePersistence({synchronizeTabs:true}).catch(() => {});
+  const T = id => db.collection('seeding_tasks').doc(id);
+  return {
+    onAuth(cb){ auth.onAuthStateChanged(cb); auth.getRedirectResult().catch(e => cb(null, e)); },
+    async login(){
+      const p = new firebase.auth.GoogleAuthProvider();
+      try{ await auth.signInWithPopup(p); }
+      catch(e){
+        const ios = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        if(e.code === 'auth/popup-blocked') throw new Error('彈出視窗被擋住了：iPhone 請到「設定 → Safari」關閉「阻擋彈出式視窗」，再按一次登入');
+        if(e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request') return;
+        if(!ios && e.code === 'auth/operation-not-supported-in-this-environment') return auth.signInWithRedirect(p);
+        throw new Error('登入失敗：' + (e.code || e.message));
+      }
+    },
+    logout(){ return auth.signOut(); },
+    async profile(user){
+      const [u, g] = await Promise.all([db.collection('hub_settings').doc('users').get(), db.collection('hub_settings').doc('global').get().catch(() => null)]);
+      const users = u.exists ? u.data() : {}, email = (user.email || '').toLowerCase();
+      const rec = users[email] || Object.entries(users).find(([k]) => k.toLowerCase() === email)?.[1];
+      const admins = (g && g.exists && g.data().superAdmins) || [];
+      return {ok: !!rec || admins.includes(email), blocked: !!(rec && (rec.blockedSystems || []).includes('seeding')), name: (rec && rec.name) || user.displayName || email};
+    },
+    watchTasks(cb){
+      const all = new Map(), push = () => cb([...all.values()]);
+      const take = qs => { qs.docChanges().forEach(ch => ch.type === 'removed' ? all.delete(ch.doc.id) : all.set(ch.doc.id, {id:ch.doc.id, ...ch.doc.data()})); push(); };
+      const err = e => toast('讀取任務失敗：' + e.message, 5000);
+      const u1 = db.collection('seeding_tasks').where('assignees', 'array-contains', me.email).onSnapshot(take, err);
+      const u2 = db.collection('seeding_tasks').where('createdBy', '==', me.email).onSnapshot(take, err);
+      return () => { u1(); u2(); };
+    },
+    watchTask(id, cb){
+      let task = null, rounds = [];
+      const push = () => task && cb(task, rounds);
+      const u1 = T(id).onSnapshot(d => { task = d.exists ? {id:d.id, ...d.data()} : null; push(); }, e => toast('讀取失敗：' + e.message, 5000));
+      const u2 = T(id).collection('rounds').onSnapshot(qs => { rounds = qs.docs.map(d => ({id:d.id, ...d.data()})).sort((a,b) => a.no - b.no); push(); }, e => toast('讀取失敗：' + e.message, 5000));
+      return () => { u1(); u2(); };
+    },
+    // patch 的 key 可以是 "placed.12_0" 這種路徑；值為 null 代表刪除
+    updateRound(taskId, rid, patch){
+      const p = {}; for(const [k, v] of Object.entries(patch)) p[k] = v === null ? FV.delete() : v;
+      return T(taskId).collection('rounds').doc(rid).update(p);
+    },
+    updateTask(taskId, patch){ return T(taskId).update(patch); },
+    addLog(taskId, x){ return T(taskId).collection('log').add({...x, at: Date.now(), by: me.email, byName: me.name}); },
+  };
+}
+
+function demoApi(){
+  const names = ['海報 A','T恤 黑 M','T恤 白 L','毛巾','貼紙組','帽子','手環','鑰匙圈','水壺袋','徽章'];
+  let seed = 7; const R = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const mkRound = (no, n, seq0) => ({id: String(no).padStart(3,'0'), no, label:`散單_${String(no).padStart(2,'0')}`, seqFrom:seq0, seqTo:seq0+n-1, placed:{}, flags:{},
+    orders: Array.from({length:n}, (_, i) => { const k = 1 + Math.floor(R()*3), s = new Set(); while(s.size < k) s.add(names[Math.floor(R()*names.length)]);
+      return {slot:i+1, seq:seq0+i, id:'2026112500' + String(seq0+i).padStart(4,'0'), name:'測試' + (seq0+i), p3:String(100 + Math.floor(R()*900)),
+        items:[...s].map((nm, k2) => ({k:k2, name:nm, sku:'SKU-' + names.indexOf(nm), qty: R() < .8 ? 1 : 2}))}; })});
+  const task = {id:'demo', name:'測試任務 1125', project:'測試專案', createdBy:'me@test', assignees:['me@test'], assigneeNames:{'me@test':'測試員'}, status:'open', createdAt:Date.now(), rounds:2, orders:73};
+  const rounds = [mkRound(1, 50, 31), mkRound(2, 23, 81)];
+  const subs = new Set(); const emit = () => subs.forEach(f => f());
+  const setPath = (obj, path, v) => { const ks = path.split('.'); let o = obj; ks.slice(0,-1).forEach(k => o = o[k] = o[k] || {}); if(v === null) delete o[ks.at(-1)]; else o[ks.at(-1)] = v; };
+  return {
+    onAuth(cb){ setTimeout(() => cb({email:'me@test', displayName:'測試員'}), 0); },
+    login(){}, logout(){ location.reload(); },
+    async profile(){ return {ok:true, blocked:false, name:'測試員'}; },
+    watchTasks(cb){ const f = () => cb([task]); subs.add(f); f(); return () => subs.delete(f); },
+    watchTask(id, cb){ const f = () => cb({...task}, rounds.map(r => ({...r}))); subs.add(f); f(); return () => subs.delete(f); },
+    async updateRound(tid, rid, patch){ const r = rounds.find(x => x.id === rid); for(const [k, v] of Object.entries(patch)) setPath(r, k, v); emit(); },
+    async updateTask(tid, patch){ Object.assign(task, patch); emit(); },
+    async addLog(){},
+  };
+}
+
+/* ================= 狀態與工具 ================= */
+const S = {view:'login', taskId:null, task:null, rounds:[], rid:null, mode:'item', itemKey:null, slot:null, showClosed:false, unsub:null, unsubTasks:null, tasks:[]};
+const round = () => S.rounds.find(r => r.id === S.rid);
+const faceOf = slot => slot <= PER_FACE ? 'A' : 'B';
+const pkey = (slot, k) => `${slot}_${k}`;
+const itemKeyOf = it => it.sku || it.name;
+const flagOf = (r, slot) => (r.flags || {})[slot] || null;
+const isCancel = (r, slot) => (flagOf(r, slot) || {}).type === 'cancel';
+const isPri = (r, slot) => (flagOf(r, slot) || {}).type === 'priority';
+// 每一輪的進度：取消的訂單不算
+function roundStat(r){
+  let total = 0, put = 0;
+  (r.orders || []).forEach(o => { if(isCancel(r, o.slot)) return; o.items.forEach(it => { total++; if((r.placed || {})[pkey(o.slot, it.k)]) put++; }); });
+  return {total, put, done: total > 0 && put === total};
+}
+// 以商品為主：同一個商品在這一輪要放進哪些籃
+function productsOf(r){
+  const m = new Map();
+  (r.orders || []).forEach(o => o.items.forEach(it => {
+    const key = itemKeyOf(it); if(!m.has(key)) m.set(key, {key, name:it.name, sku:it.sku, need:[], total:0, put:0, units:0});
+    const p = m.get(key); p.need.push({slot:o.slot, k:it.k, qty:it.qty});
+    if(!isCancel(r, o.slot)){ p.total++; p.units += Number(it.qty) || 0; if((r.placed || {})[pkey(o.slot, it.k)]) p.put++; }
+  }));
+  return [...m.values()].sort((a,b) => (a.put === a.total) - (b.put === b.total) || b.need.length - a.need.length || a.name.localeCompare(b.name, 'zh-Hant'));
+}
+function claimWarn(r){
+  const c = r.claim; if(!c || c.email === me.email) return '';
+  const fresh = Date.now() - (c.at || 0) < 30 * 60 * 1000;
+  return fresh ? `${c.name || c.email} 正在播這一輪（${fmtTime(c.at)}）` : '';
+}
+
+/* ================= 畫面 ================= */
+function setHeader(title, back){
+  $('#title').textContent = title; $('#backBtn').hidden = !back; $('#flagBtn').hidden = !S.taskId || S.view === 'login' || S.view === 'tasks';
+}
+$('#backBtn').onclick = () => {
+  if(S.view === 'item' || S.view === 'slot'){ S.view = 'round'; S.itemKey = null; S.slot = null; }
+  else if(S.view === 'round'){ S.view = 'task'; S.rid = null; }
+  else if(S.view === 'task'){ openTasks(); return; }
+  render();
+};
+$('#flagBtn').onclick = () => openFlagSheet();
+
+function render(){
+  const app = $('#app');
+  if(S.view === 'login') return;
+  if(S.view === 'tasks') return renderTasks(app);
+  if(!S.task){ app.innerHTML = '<div class="card muted">讀取中…</div>'; return; }
+  if(S.view === 'task') return renderTask(app);
+  const r = round(); if(!r){ S.view = 'task'; return renderTask(app); }
+  if(S.view === 'round') return renderRound(app, r);
+  if(S.view === 'item') return renderItem(app, r);
+  if(S.view === 'slot') return renderSlot(app, r);
+}
+
+function renderLogin(msg = ''){
+  S.view = 'login'; setHeader('播種配貨', false);
+  $('#app').innerHTML = `<div class="card"><p>請用公司 Google 帳號登入。</p><button class="btn" id="loginBtn">Google 登入</button><p class="muted" id="loginMsg">${esc(msg)}</p>
+    ${/Line\/|FBAN|FBAV|Instagram/i.test(navigator.userAgent) ? '<p class="muted" style="color:var(--warn)">LINE 內建瀏覽器無法登入，請點右上角「…」用 Safari 或 Chrome 開啟。</p>' : ''}</div>`;
+  $('#loginBtn').onclick = async () => { try{ await api.login(); }catch(e){ $('#loginMsg').textContent = e.message; } };
+}
+
+function openTasks(){
+  if(S.unsub){ S.unsub(); S.unsub = null; }
+  S.view = 'tasks'; S.taskId = null; S.task = null; S.rounds = []; S.rid = null;
+  if(!S.unsubTasks) S.unsubTasks = api.watchTasks(ts => { S.tasks = ts; if(S.view === 'tasks') render(); });
+  render();
+}
+function renderTasks(app){
+  setHeader('播種任務', false);
+  const list = S.tasks.filter(t => S.showClosed || t.status !== 'closed').sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
+  app.innerHTML = `
+    <div class="card row"><div class="muted">${esc(me.name)}（${esc(me.email)}）</div><button class="btn ghost small" id="logout" style="flex:none">登出</button></div>
+    <div class="list">${list.map(t => `
+      <div class="item ${t.status === 'closed' ? 'done' : ''}" data-id="${esc(t.id)}">
+        <div class="main"><div class="t">${esc(t.name)}</div>
+        <div class="s">${t.rounds || 0} 輪・${t.orders || 0} 單・${fmtTime(t.createdAt || 0)} 由 ${esc(t.createdByName || t.createdBy)} 發布</div>
+        <div class="s">指派：${esc((t.assignees || []).map(e => (t.assigneeNames || {})[e] || e).join('、'))}</div></div>
+        <span class="pill ${t.status === 'closed' ? '' : 'ok'}">${t.status === 'closed' ? '已結束' : '進行中'}</span></div>`).join('')
+      || '<div class="card muted">目前沒有指派給你的播種任務。任務由整單系統（order-batcher）發布。</div>'}</div>
+    <p style="text-align:center"><label class="muted"><input type="checkbox" id="showClosed" ${S.showClosed ? 'checked' : ''}> 顯示已結束的任務</label></p>`;
+  app.querySelectorAll('[data-id]').forEach(el => el.onclick = () => openTask(el.dataset.id));
+  $('#showClosed').onchange = e => { S.showClosed = e.target.checked; render(); };
+  $('#logout').onclick = () => api.logout();
+}
+
+function openTask(id){
+  S.taskId = id; S.task = null; S.rounds = []; S.view = 'task';
+  try{ localStorage.setItem('seeding_task', id); }catch(e){}
+  if(S.unsub) S.unsub();
+  S.unsub = api.watchTask(id, (t, rs) => { S.task = t; S.rounds = rs; render(); });
+  render();
+}
+function renderTask(app){
+  const t = S.task; setHeader(t.name, true);
+  let tot = 0, put = 0, flags = 0;
+  S.rounds.forEach(r => { const s = roundStat(r); tot += s.total; put += s.put; flags += Object.keys(r.flags || {}).length; });
+  app.innerHTML = `
+    <div class="card"><div class="muted">${esc(t.project || '')}</div>
+      <div><b>${put}</b> / ${tot} 項已放・${S.rounds.length} 輪${flags ? `・<span class="pill warn">${flags} 筆異動</span>` : ''}</div>
+      <div class="bar"><i style="width:${tot ? put / tot * 100 : 0}%"></i></div></div>
+    <div class="list">${S.rounds.map(r => { const s = roundStat(r), cw = claimWarn(r), nf = Object.keys(r.flags || {}).length;
+      return `<div class="item ${s.done ? 'done' : ''}" data-r="${esc(r.id)}"><div class="main">
+        <div class="t">第 ${r.no} 輪　單序 ${r.seqFrom}–${r.seqTo}</div>
+        <div class="s">${(r.orders || []).length} 籃・${s.put}/${s.total} 項${nf ? `・<span class="pill warn">${nf} 筆異動</span>` : ''}${cw ? `・<span class="pill pri">${esc(cw)}</span>` : (r.claim && !s.done ? `・${esc(r.claim.name || '')}` : '')}</div>
+        <div class="bar"><i style="width:${s.total ? s.put / s.total * 100 : 0}%"></i></div></div></div>`; }).join('')}</div>
+    ${t.createdBy === me.email ? `<div class="card" style="margin-top:12px"><button class="btn ghost" id="closeTask">${t.status === 'closed' ? '重新開啟這個任務' : '結束這個任務'}</button>
+      <p class="muted">結束後指派的人就不會在清單看到（勾「顯示已結束」仍可查看）。</p></div>` : ''}`;
+  app.querySelectorAll('[data-r]').forEach(el => el.onclick = () => openRound(el.dataset.r));
+  const ct = $('#closeTask'); if(ct) ct.onclick = async () => {
+    const closing = t.status !== 'closed';
+    if(closing && !confirm('確定結束這個任務？')) return;
+    await api.updateTask(t.id, {status: closing ? 'closed' : 'open'}); toast(closing ? '已結束' : '已重新開啟');
+  };
+}
+
+async function openRound(rid){
+  const r = S.rounds.find(x => x.id === rid); if(!r) return;
+  const cw = claimWarn(r);
+  if(cw && !confirm(`${cw}。\n兩個人可以同時播（進度會同步），確定也要進入？`)) return;
+  S.rid = rid; S.view = 'round';
+  api.updateRound(S.taskId, rid, {claim: {email: me.email, name: me.name, at: Date.now()}}).catch(() => {});
+  render();
+}
+function renderRound(app, r){
+  setHeader(`第 ${r.no} 輪`, true);
+  const s = roundStat(r);
+  const head = `
+    <div class="sticky">
+      <div class="seg"><button data-m="item" class="${S.mode === 'item' ? 'on' : ''}">以商品為主</button><button data-m="slot" class="${S.mode === 'slot' ? 'on' : ''}">以籃子為主</button></div>
+      <div class="muted">單序 ${r.seqFrom}–${r.seqTo}・${s.put}/${s.total} 項已放</div>
+      <div class="bar"><i style="width:${s.total ? s.put / s.total * 100 : 0}%"></i></div>
+    </div>
+    ${s.done ? '<div class="banner ok">這一輪全部放完了 👍 託運單照籃號順序放進籃子，再交給包裝核對。</div>' : ''}`;
+  let body;
+  if(S.mode === 'item'){
+    body = `<div class="list">${productsOf(r).map(p => `
+      <div class="item ${p.put === p.total ? 'done' : ''}" data-k="${esc(p.key)}"><div class="main"><div class="t">${esc(p.name)}</div>
+      <div class="s">${p.sku ? esc(p.sku) + '・' : ''}${p.total} 籃・共 ${p.units} 件・已放 ${p.put}</div></div>
+      <span class="big" style="font-size:22px">${p.units}</span></div>`).join('')}</div>`;
+  }else{
+    body = gridHtml(r, slot => {
+      const o = r.orders.find(x => x.slot === slot); if(!o) return {cls:'empty', q:''};
+      const n = o.items.length, put = o.items.filter(it => (r.placed || {})[pkey(slot, it.k)]).length;
+      if(isCancel(r, slot)) return {cls:'cancel', q:'取消', tag:''};
+      return {cls: put === n ? 'put' : 'need', q: put === n ? '✓' : `${n - put}`, tag: put === n ? '' : '項', pri: isPri(r, slot), click:true};
+    });
+  }
+  app.innerHTML = head + body;
+  app.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { S.mode = b.dataset.m; render(); });
+  app.querySelectorAll('[data-k]').forEach(el => el.onclick = () => { S.itemKey = el.dataset.k; S.view = 'item'; render(); window.scrollTo(0, 0); });
+  app.querySelectorAll('.cell[data-slot]').forEach(el => el.onclick = () => { S.slot = Number(el.dataset.slot); S.view = 'slot'; render(); window.scrollTo(0, 0); });
+}
+// 層架圖：A 面、B 面各 5×5
+function gridHtml(r, cellOf){
+  const used = Math.max(...(r.orders || []).map(o => o.slot), 0);
+  const faces = used > PER_FACE ? ['A','B'] : ['A'];
+  return faces.map(f => {
+    const base = f === 'A' ? 0 : PER_FACE;
+    let cells = '';
+    for(let i = 1; i <= PER_FACE; i++){
+      const slot = base + i, c = cellOf(slot);
+      cells += `<div class="cell ${c.cls}${c.pri ? ' pri' : ''}" ${c.click ? `data-slot="${slot}"` : ''}><span class="no">${slot}</span><span class="q">${esc(c.q)}</span>${c.tag ? `<span class="tag">${esc(c.tag)}</span>` : ''}</div>`;
+    }
+    return `<div class="face"><h3>${f} 面（${base + 1}～${base + PER_FACE}，最上層左邊開始）</h3><div class="grid">${cells}</div></div>`;
+  }).join('');
+}
+
+function renderItem(app, r){
+  const p = productsOf(r).find(x => x.key === S.itemKey);
+  if(!p){ S.view = 'round'; return renderRound(app, r); }
+  setHeader(`第 ${r.no} 輪・商品`, true);
+  const needMap = new Map(p.need.map(n => [n.slot, n]));
+  const left = p.total - p.put;
+  app.innerHTML = `
+    <div class="sticky"><div class="big">${esc(p.name)}</div>
+      <div class="muted">${p.sku ? esc(p.sku) + '・' : ''}共 ${p.units} 件・${left ? `還有 <b>${left}</b> 籃要放` : '這個商品放完了'}</div></div>
+    <p class="muted" style="margin:0 0 8px">黃色格子＝要放，格子上的數字是件數；放好點一下變綠色，點錯再點一下取消。</p>
+    ${gridHtml(r, slot => {
+      const n = needMap.get(slot); if(!n) return {cls:'', q:''};
+      if(isCancel(r, slot)) return {cls:'cancel', q:'取消'};
+      const put = !!(r.placed || {})[pkey(slot, n.k)];
+      return {cls: put ? 'put' : 'need', q: put ? '✓' : `×${n.qty}`, pri: isPri(r, slot), click:true};
+    })}
+    <div class="navrow"><button class="btn ghost" id="toList">商品清單</button>${left ? '' : '<button class="btn" id="nextItem">下一個商品</button>'}</div>`;
+  app.querySelectorAll('.cell[data-slot]').forEach(el => el.onclick = () => {
+    const slot = Number(el.dataset.slot), n = needMap.get(slot); if(!n || isCancel(r, slot)) return;
+    const k = pkey(slot, n.k), on = !(r.placed || {})[k];
+    buzz(on ? 30 : [20, 40, 20]);
+    api.updateRound(S.taskId, r.id, {[`placed.${k}`]: on ? {by: me.email, at: Date.now()} : null, claim: {email: me.email, name: me.name, at: Date.now()}}).catch(e => toast('儲存失敗：' + e.message, 4000));
+    if(on && isPri(r, slot)) toast(`第 ${slot} 籃是優先處理`);
+  });
+  $('#toList').onclick = () => { S.view = 'round'; render(); };
+  const nx = $('#nextItem'); if(nx) nx.onclick = () => { const q = productsOf(r).find(x => x.put < x.total); if(q){ S.itemKey = q.key; render(); window.scrollTo(0, 0); } else { S.view = 'round'; render(); } };
+}
+
+function renderSlot(app, r){
+  const o = r.orders.find(x => x.slot === S.slot);
+  if(!o){ S.view = 'round'; return renderRound(app, r); }
+  setHeader(`第 ${r.no} 輪・籃子`, true);
+  const f = flagOf(r, o.slot), cancel = isCancel(r, o.slot);
+  const face = faceOf(o.slot), idx = (o.slot - 1) % PER_FACE;
+  const slots = r.orders.map(x => x.slot).sort((a,b) => a - b), i = slots.indexOf(o.slot);
+  app.innerHTML = `
+    <div class="sticky"><div class="big" style="font-size:40px">${o.slot} 號籃</div>
+      <div class="muted">${face} 面第 ${Math.floor(idx / COLS) + 1} 層第 ${idx % COLS + 1} 格・單序 ${o.seq}・${esc(o.name)}（末三碼 ${esc(o.p3)}）・${esc(o.id)}</div></div>
+    ${cancel ? `<div class="banner cancel">已取消，不要放，已放的退回上架</div>` : ''}
+    ${f && f.type === 'priority' ? `<div class="banner pri">優先處理</div>` : ''}
+    ${f ? `<p class="muted" style="margin-top:-4px">${esc(f.byName || f.by)} 標記於 ${fmtTime(f.at)}</p>` : ''}
+    <ul class="lines">${o.items.map(it => { const put = !!(r.placed || {})[pkey(o.slot, it.k)];
+      return `<li class="${put ? 'put' : ''}" data-k="${it.k}"><span class="ck">${put ? '✓' : ''}</span><span class="n">${esc(it.name)}${it.sku ? `<br><span class="muted">${esc(it.sku)}</span>` : ''}</span><span class="q">×${esc(it.qty)}</span></li>`; }).join('')}</ul>
+    <div class="navrow"><button class="btn ghost" id="prev" ${i <= 0 ? 'disabled' : ''}>‹ ${i > 0 ? slots[i-1] + ' 號' : ''}</button><button class="btn ghost" id="next" ${i >= slots.length - 1 ? 'disabled' : ''}>${i < slots.length - 1 ? slots[i+1] + ' 號' : ''} ›</button></div>`;
+  app.querySelectorAll('.lines li').forEach(el => el.onclick = () => {
+    if(cancel) return toast('這張單已取消');
+    const k = pkey(o.slot, el.dataset.k), on = !(r.placed || {})[k];
+    buzz(on ? 30 : [20, 40, 20]);
+    api.updateRound(S.taskId, r.id, {[`placed.${k}`]: on ? {by: me.email, at: Date.now()} : null, claim: {email: me.email, name: me.name, at: Date.now()}}).catch(e => toast('儲存失敗：' + e.message, 4000));
+  });
+  $('#prev').onclick = () => { if(i > 0){ S.slot = slots[i-1]; render(); } };
+  $('#next').onclick = () => { if(i < slots.length - 1){ S.slot = slots[i+1]; render(); } };
+}
+
+/* ================= 異動：取消／優先 ================= */
+function openFlagSheet(){
+  const m = $('#modal'), sh = $('#sheet'); m.hidden = false;
+  sh.innerHTML = `<div class="row" style="margin-bottom:10px"><b style="font-size:18px">取消／優先處理</b><button class="btn ghost small" id="mClose" style="flex:none">關閉</button></div>
+    <input class="search" id="q" placeholder="訂單編號、姓名、電話末三碼或單序" autocomplete="off">
+    <div id="hits" class="list" style="margin-top:10px"></div>`;
+  const q = $('#q'); q.focus();
+  const run = () => {
+    const v = q.value.trim().toLowerCase(), hits = [];
+    if(v) S.rounds.forEach(r => (r.orders || []).forEach(o => {
+      if(String(o.id).toLowerCase().includes(v) || String(o.name).toLowerCase().includes(v) || o.p3 === v || String(o.seq) === v) hits.push({r, o});
+    }));
+    $('#hits').innerHTML = hits.slice(0, 30).map(({r, o}, i) => { const f = flagOf(r, o.slot);
+      return `<div class="card" style="margin:0"><div><b>第 ${r.no} 輪 ${o.slot} 號籃</b>・單序 ${o.seq}・${esc(o.name)}（${esc(o.p3)}）</div>
+        <div class="muted">${esc(o.id)}・${o.items.map(it => esc(it.name) + '×' + esc(it.qty)).join('、')}</div>
+        ${f ? `<div style="margin:4px 0"><span class="pill ${f.type === 'cancel' ? 'warn' : 'pri'}">${f.type === 'cancel' ? '已取消' : '優先'}</span> <span class="muted">${esc(f.byName || f.by)} ${fmtTime(f.at)}</span></div>` : ''}
+        <div class="row" style="margin-top:8px">
+          <button class="btn danger small" data-i="${i}" data-t="cancel">取消</button>
+          <button class="btn small" data-i="${i}" data-t="priority" style="background:var(--pri);color:#fff">優先</button>
+          ${f ? `<button class="btn ghost small" data-i="${i}" data-t="clear">清除標記</button>` : ''}</div></div>`; }).join('')
+      || (v ? '<div class="muted">找不到符合的訂單</div>' : '<div class="muted">輸入後會列出這個任務裡符合的訂單</div>');
+    $('#hits').querySelectorAll('[data-t]').forEach(b => b.onclick = async () => {
+      const {r, o} = hits[Number(b.dataset.i)], t = b.dataset.t;
+      const label = {cancel:'取消', priority:'優先處理', clear:'清除標記'}[t];
+      if(t === 'cancel' && !confirm(`確定把第 ${r.no} 輪 ${o.slot} 號籃（${o.name}）標記為取消？\n\n提醒：請同時到 shipment.html 和 SG 取消這張單。`)) return;
+      try{
+        await api.updateRound(S.taskId, r.id, {[`flags.${o.slot}`]: t === 'clear' ? null : {type:t, by:me.email, byName:me.name, at:Date.now()}});
+        await api.addLog(S.taskId, {action:t, round:r.no, slot:o.slot, seq:o.seq, orderId:o.id});
+        toast(`第 ${r.no} 輪 ${o.slot} 號籃：${label}`); buzz(60);
+      }catch(e){ toast('儲存失敗：' + e.message, 4000); }
+      setTimeout(run, 50);
+    });
+  };
+  q.oninput = run; run();
+  $('#mClose').onclick = () => { m.hidden = true; };
+}
+$('#modal').onclick = e => { if(e.target.id === 'modal') $('#modal').hidden = true; };
+
+/* ================= 啟動 ================= */
+const syncNet = () => $('#net').hidden = navigator.onLine;
+addEventListener('online', syncNet); addEventListener('offline', syncNet); syncNet();
+api.onAuth(async (user, err) => {
+  if(err){ renderLogin(err.message || String(err)); return; }
+  if(!user){ if(S.unsub) S.unsub(); if(S.unsubTasks) S.unsubTasks(); S.unsub = S.unsubTasks = null; me = null; renderLogin(); return; }
+  try{
+    const pf = await api.profile(user);
+    if(!pf.ok || pf.blocked){ renderLogin(`${user.email} 沒有使用權限，請聯絡管理員到 Hub 加入帳號。`); return; }
+    me = {email: (user.email || '').toLowerCase(), name: pf.name};
+  }catch(e){ renderLogin('讀取權限失敗：' + e.message); return; }
+  const want = new URLSearchParams(location.search).get('task');
+  if(want) openTask(want); else openTasks();
+});
+</script>
+</body>
+</html>
