@@ -35,7 +35,7 @@ main{max-width:720px;margin:0 auto;padding:12px}
 .item{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;cursor:pointer;display:flex;align-items:center;gap:12px}
 .item:active{background:var(--soft)}
 .item .main{flex:1;min-width:0}
-.item .t{font-weight:700;font-size:17px;word-break:break-all}
+.item .t{font-weight:700;font-size:17px;overflow-wrap:anywhere}
 .item .s{font-size:13px;color:var(--mute)}
 .item.done{opacity:.55}
 .item.done .t::after{content:' ✓';color:var(--ok)}
@@ -47,8 +47,9 @@ main{max-width:720px;margin:0 auto;padding:12px}
 .bar i{display:block;height:100%;background:var(--ok)}
 .seg{display:flex;background:var(--soft);border-radius:10px;padding:3px;margin-bottom:10px}
 .seg button{flex:1;border:0;background:transparent;border-radius:8px;padding:8px;font-weight:700;font-size:15px;cursor:pointer;color:var(--steel)}
+.seg.four button{flex:1 1 auto;padding:8px 4px;font-size:14px;white-space:nowrap}
 .seg button.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.15)}
-.big{font-size:26px;font-weight:900;line-height:1.25;word-break:break-all}
+.big{font-size:26px;font-weight:900;line-height:1.25;overflow-wrap:anywhere}
 .sticky{position:sticky;top:52px;z-index:10;background:var(--paper);padding:6px 0 8px}
 /* 層架圖：一面 5 層 × 5 格，從上層左邊開始編號 */
 .face{margin-bottom:12px}
@@ -68,7 +69,7 @@ main{max-width:720px;margin:0 auto;padding:12px}
 .lines{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
 .lines li{display:flex;align-items:center;gap:12px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px;cursor:pointer;font-size:18px}
 .lines li .q{font-size:24px;font-weight:900;min-width:52px;text-align:right}
-.lines li .n{flex:1;word-break:break-all}
+.lines li .n{flex:1;overflow-wrap:anywhere}
 .lines li .ck{width:30px;height:30px;border-radius:50%;border:2px solid var(--line);flex:none;display:flex;align-items:center;justify-content:center;font-weight:900}
 .lines li.put{background:var(--ok-bg);border-color:var(--ok)}
 .lines li.put .ck{background:var(--ok);border-color:var(--ok);color:#fff}
@@ -114,17 +115,20 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
 <script>
 /* 播種配貨（手機）
    資料：Firestore ezfun-warehouse-billing
-     seeding_tasks/{taskId}            任務：name、project、ship、createdBy、assignees[]、members[]（指派＋開過網址的人）、status、rounds、orders
-     seeding_tasks/{taskId}/rounds/{r} 每輪（最多 50 籃）：orders[{slot,seq,id,name,p3,note,items[{k,name,sku,qty}]}]
+     seeding_tasks/{taskId}            任務：name、project、wh（倉庫中文名，例如 汐止倉）、ships[]（這個任務含的物流）、createdBy、assignees[]、members[]（指派＋開過網址的人）、status、rounds、orders
+                                       舊任務的 ship 是 order-batcher「物流上傳」的設定，不一定是訂單實際的物流，不再顯示
+     seeding_tasks/{taskId}/rounds/{r} 每輪（最多 50 籃、只含一種物流）：ship、orders[{slot,seq,id,name,p3,note,items[{k,name,sku,qty}]}]
+        picked{ 商品雜湊: {by,byName,at,item} }    撿貨：這一輪要的數量已經撿齊
         placed{ "籃號_第幾項": {by,byName,at} }   播種已放
         checked{ "籃號_第幾項": {by,byName,at} }  檢查已核對
         owners{ 商品雜湊: {email,name,at,item} }  誰負責這個商品（不擋人，只提醒）
         flags{ 籃號: {type:'cancel'|'priority',...} }、issues{ 籃號: {type:'short'|'extra'|'wrong',note,...} }
      seeding_tasks/{taskId}/log        取消／優先／問題等異動紀錄
    籃號：A 面 1～25、B 面 26～50，每面 5 層 × 5 格，從最上層左邊開始往右、再往下。
-   任何在 Hub 使用者名單裡的人，拿到任務網址（?task=）都能加入；被指派只決定任務會不會出現在清單。
+   任務清單：同倉庫的人（hub_settings/users.warehouses 含任務的 wh）都看得到，點進去就加入；被指派只是標記。
+   拿到任務網址（?task=）的 Hub 使用者也能加入（沒有 wh 的舊任務靠這個）。
    ?demo=1 用假資料，不連 Firestore（測試畫面用）。 */
-const SEED_VERSION = '2026-11-25-3';
+const SEED_VERSION = '2026-11-26-1';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DEMO = new URLSearchParams(location.search).has('demo');
@@ -172,15 +176,18 @@ function fireApi(){
       const users = u.exists ? u.data() : {}, email = (user.email || '').toLowerCase();
       const rec = users[email] || Object.entries(users).find(([k]) => k.toLowerCase() === email)?.[1];
       const admins = ((g && g.exists && g.data().superAdmins) || []).map(x => String(x).toLowerCase());
-      return {ok: !!rec || admins.includes(email), blocked: !!(rec && (rec.blockedSystems || []).includes('seeding')), name: (rec && rec.name) || user.displayName || email};
+      return {ok: !!rec || admins.includes(email), blocked: !!(rec && (rec.blockedSystems || []).includes('seeding')), name: (rec && rec.name) || user.displayName || email,
+        warehouses: ((rec && rec.warehouses) || []).map(String).filter(Boolean)};
     },
     watchTasks(cb){
       // 每個查詢各自保留結果，再合併（同一個任務可能同時符合多個條件）
-      const parts = [new Map(), new Map(), new Map()], push = () => { const all = new Map(); parts.forEach(m => m.forEach((v, k) => all.set(k, v))); cb([...all.values()]); };
-      const err = e => toast('讀取任務失敗：' + e.message, 5000);
       const q = [db.collection('seeding_tasks').where('members', 'array-contains', me.email),
                  db.collection('seeding_tasks').where('assignees', 'array-contains', me.email),
                  db.collection('seeding_tasks').where('createdBy', '==', me.email)];
+      // 同倉庫的任務：Firestore 的 in 一次最多 30 個值
+      if(me.warehouses.length) q.push(db.collection('seeding_tasks').where('wh', 'in', me.warehouses.slice(0, 30)));
+      const parts = q.map(() => new Map()), push = () => { const all = new Map(); parts.forEach(m => m.forEach((v, k) => all.set(k, v))); cb([...all.values()]); };
+      const err = e => toast('讀取任務失敗：' + e.message, 5000);
       const us = q.map((qq, i) => qq.onSnapshot(qs => { parts[i] = new Map(qs.docs.map(d => [d.id, {id:d.id, ...d.data()}])); push(); }, err));
       return () => us.forEach(u => u());
     },
@@ -203,21 +210,21 @@ function fireApi(){
 }
 
 function demoApi(){
-  const names = ['海報 A','T恤 黑 M','T恤 白 L','毛巾','貼紙組','帽子','手環','鑰匙圈','水壺袋','徽章'];
+  const names = ['海報 A','T恤 黑 M','T恤 白 L','T恤 黑 XL','mollis純棉日拋褲六入組 XL','毛巾','貼紙組','帽子','T恤 白 S','鑰匙圈','水壺袋','徽章'];
   let seed = 7; const R = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-  const mkRound = (no, n, seq0) => ({id: String(no).padStart(3,'0'), no, seqFrom:seq0, seqTo:seq0+n-1, placed:{}, flags:{}, checked:{}, owners:{}, issues:{},
+  const mkRound = (no, n, seq0, ship) => ({id: String(no).padStart(3,'0'), no, ship, seqFrom:seq0, seqTo:seq0+n-1, picked:{}, placed:{}, flags:{}, checked:{}, owners:{}, issues:{},
     orders: Array.from({length:n}, (_, i) => { const k = 1 + Math.floor(R()*3), s = new Set(); while(s.size < k) s.add(names[Math.floor(R()*names.length)]);
       return {slot:i+1, seq:seq0+i, id:'2026112500' + String(seq0+i).padStart(4,'0'), name:'測試' + (seq0+i), p3:String(100 + Math.floor(R()*900)), note: i % 7 === 3 ? '不要放發票' : '',
         items:[...s].map((nm, k2) => ({k:k2, name:nm, sku:'SKU-' + names.indexOf(nm), qty: R() < .8 ? 1 : 2}))}; })});
-  const task = {id:'demo', name:'測試任務 1125', project:'測試專案', ship:'新竹', createdBy:'me@test', assignees:['me@test'], members:['me@test'], assigneeNames:{'me@test':'測試員'}, status:'open', createdAt:Date.now(), rounds:2, orders:73};
-  const rounds = [mkRound(1, 50, 31), mkRound(2, 23, 81)];
+  const task = {id:'demo', name:'測試任務 1125', project:'測試專案', wh:'汐止倉', ships:['7-11','全家'], createdBy:'me@test', assignees:['me@test'], members:['me@test'], assigneeNames:{'me@test':'測試員'}, status:'open', createdAt:Date.now(), rounds:2, orders:73};
+  const rounds = [mkRound(1, 50, 31, '7-11'), mkRound(2, 23, 81, '全家')];
   const subs = new Set(); const emit = () => subs.forEach(f => f());
   const setPath = (obj, path, v) => { const ks = path.split('.'); let o = obj; ks.slice(0,-1).forEach(k => o = o[k] = o[k] || {}); if(v === null) delete o[ks.at(-1)]; else o[ks.at(-1)] = v; };
   window.__demo = {task, rounds, emit};
   return {
     onAuth(cb){ setTimeout(() => cb({email:'me@test', displayName:'測試員'}), 0); },
     login(){}, logout(){ location.reload(); },
-    async profile(){ return {ok:true, blocked:false, name:'測試員'}; },
+    async profile(){ return {ok:true, blocked:false, name:'測試員', warehouses:['汐止倉']}; },
     watchTasks(cb){ const f = () => cb([task]); subs.add(f); f(); return () => subs.delete(f); },
     watchTask(id, cb){ const f = () => cb({...task}, rounds.map(r => JSON.parse(JSON.stringify(r)))); subs.add(f); f(); return () => subs.delete(f); },
     async join(){},
@@ -228,7 +235,7 @@ function demoApi(){
 }
 
 /* ================= 狀態與工具 ================= */
-const S = {view:'login', taskId:null, task:null, rounds:[], rid:null, mode:'item', itemKey:null, slot:null, showClosed:false, unsub:null, unsubTasks:null, tasks:[], warned:{}};
+const S = {view:'login', taskId:null, task:null, rounds:[], rid:null, mode:'pick', itemKey:null, slot:null, showClosed:false, unsub:null, unsubTasks:null, tasks:[], warned:{}};
 const round = () => S.rounds.find(r => r.id === S.rid);
 const faceOf = slot => slot <= PER_FACE ? 'A' : 'B';
 const pkey = (slot, k) => `${slot}_${k}`;
@@ -271,9 +278,28 @@ function productsOf(r){
     const p = m.get(key); p.need.push({slot:o.slot, k:it.k, qty:it.qty});
     if(!isCancel(r, o.slot)){ p.total++; p.units += Number(it.qty) || 0; if((r.placed || {})[pkey(o.slot, it.k)]) p.put++; }
   }));
-  return [...m.values()].sort((a,b) => (a.put === a.total) - (b.put === b.total) || b.need.length - a.need.length || a.name.localeCompare(b.name, 'zh-Hant'));
+  // 同種類商品排在一起：依品名排序，尺寸照 S→M→L→XL 而不是字母順序；放完的排到最後
+  return [...m.values()].sort((a,b) => (a.put === a.total) - (b.put === b.total) || byName(a, b));
 }
+const coll = new Intl.Collator('zh-Hant', {numeric: true, sensitivity: 'base'});
+const SIZE_RANK = Object.fromEntries(['XXS','XS','S','M','L','XL','XXL','2XL','XXXL','3XL','4XL','5XL','FREE','F'].map((s, i) => [s, i + 1]));
+const SIZE_RE = /^(.*)\b(XXS|XS|S|M|L|XL|XXL|2XL|XXXL|3XL|4XL|5XL|FREE|F)\b(.*)$/i;
+function nameParts(name){
+  const s = String(name || ''), m = s.match(SIZE_RE);
+  return m ? {base: m[1].trim(), rest: m[3].trim(), size: SIZE_RANK[m[2].toUpperCase()]} : {base: s, rest: '', size: 0};
+}
+function byName(a, b){
+  const x = nameParts(a.name), y = nameParts(b.name);
+  return coll.compare(x.base, y.base) || coll.compare(x.rest, y.rest) || x.size - y.size || coll.compare(a.name, b.name) || coll.compare(a.key, b.key);
+}
+// 撿貨清單：依品名排序（勾了不移動位置）；整項都取消的商品不用撿
+const pickList = r => productsOf(r).filter(p => p.total > 0).sort(byName);
+const pickedOf = (r, key) => (r.picked || {})[hk(key)] || null;
+function pickStat(r){ const ps = pickList(r), n = ps.filter(p => pickedOf(r, p.key)).length; return {n, total: ps.length, done: ps.length > 0 && n === ps.length}; }
 const ownerOf = (r, key) => (r.owners || {})[hk(key)] || null;
+// 物流：新任務每輪各自記錄；舊任務的 ship 是上傳設定，可能跟實際不同，不顯示
+const shipOf = r => (r && r.ship) || '';
+const taskShips = (t, rs) => (t.ships && t.ships.length ? t.ships : [...new Set(rs.map(shipOf).filter(Boolean))]);
 
 /* ================= 畫面 ================= */
 function setHeader(title, back){
@@ -317,16 +343,19 @@ function openTasks(){
 function renderTasks(app){
   setHeader('播種任務', false);
   const list = S.tasks.filter(t => S.showClosed || t.status !== 'closed').sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const nClosed = S.tasks.filter(t => t.status === 'closed').length;
   app.innerHTML = `
-    <div class="card row"><div class="muted">${esc(me.name)}（${esc(me.email)}）</div><button class="btn ghost small" id="logout" style="flex:none">登出</button></div>
-    <div class="list">${list.map(t => `
+    <div class="card row"><div class="muted">${esc(me.name)}（${esc(me.email)}）${me.warehouses.length ? `<br>倉庫：${esc(me.warehouses.join('、'))}` : ''}</div><button class="btn ghost small" id="logout" style="flex:none">登出</button></div>
+    <div class="list">${list.map(t => { const asg = (t.assignees || []).includes(me.email), ships = taskShips(t, []);
+      return `
       <div class="item ${t.status === 'closed' ? 'done' : ''}" data-id="${esc(t.id)}">
         <div class="main"><div class="t">${esc(t.name)}</div>
-        <div class="s">${t.rounds || 0} 輪・${t.orders || 0} 單・${fmtTime(t.createdAt || 0)} 由 ${esc(t.createdByName || t.createdBy)} 發布</div>
-        <div class="s">指派：${esc((t.assignees || []).map(e => (t.assigneeNames || {})[e] || e).join('、'))}</div></div>
-        <span class="pill ${t.status === 'closed' ? '' : 'ok'}">${t.status === 'closed' ? '已結束' : '進行中'}</span></div>`).join('')
-      || '<div class="card muted">目前沒有你的播種任務。被指派、或開過任務網址的任務會出現在這裡；任務由整單系統（order-batcher）發布。</div>'}</div>
-    <p style="text-align:center"><label class="muted"><input type="checkbox" id="showClosed" ${S.showClosed ? 'checked' : ''}> 顯示已結束的任務</label></p>`;
+        <div class="s">${t.wh ? esc(t.wh) + '・' : ''}${ships.length ? esc(ships.join('、')) + '・' : ''}${t.rounds || 0} 輪・${t.orders || 0} 單</div>
+        <div class="s">${fmtTime(t.createdAt || 0)} 由 ${esc(t.createdByName || t.createdBy)} 發布</div>
+        ${asg ? '<div class="s"><span class="pill pri">指派給你</span></div>' : ''}</div>
+        <span class="pill ${t.status === 'closed' ? '' : 'ok'}">${t.status === 'closed' ? '已結束' : '進行中'}</span></div>`; }).join('')
+      || `<div class="card muted">目前沒有進行中的播種任務。${me.warehouses.length ? `${esc(me.warehouses.join('、'))}的任務都會出現在這裡，點進去就能加入；` : '你的 Hub 帳號沒有設定倉庫，只會看到被指派或開過網址的任務；'}任務由整單系統（order-batcher）發布。</div>`}</div>
+    <p style="text-align:center"><label class="muted"><input type="checkbox" id="showClosed" ${S.showClosed ? 'checked' : ''}> 顯示已結束的任務${nClosed ? `（${nClosed}）` : ''}</label></p>`;
   app.querySelectorAll('[data-id]').forEach(el => el.onclick = () => openTask(el.dataset.id));
   $('#showClosed').onchange = e => { S.showClosed = e.target.checked; render(); };
   $('#logout').onclick = () => api.logout();
@@ -340,7 +369,7 @@ function openTask(id){
   S.unsub = api.watchTask(id, (t, rs) => {
     if(!t){ S.unsub && S.unsub(); S.unsub = null; toast('找不到這個任務（可能已被刪除或網址有誤）', 5000); openTasks(); return; }
     S.task = t; S.rounds = rs;
-    // 拿到網址的人自動加入成員，之後任務會出現在他的清單
+    // 點進來（從清單或網址）就自動加入成員，之後任務會出現在他的清單
     if(!joined && !(t.members || []).includes(me.email)){ joined = true; api.join(id).catch(() => {}); }
     render();
   });
@@ -350,16 +379,17 @@ function renderTask(app){
   const t = S.task; setHeader(t.name, true);
   let tot = 0, put = 0, flags = 0, ck = 0, ckt = 0, iss = 0;
   S.rounds.forEach(r => { const s = roundStat(r), c = checkStat(r); tot += s.total; put += s.put; flags += Object.keys(r.flags || {}).length; ck += c.done; ckt += c.total; iss += c.issues; });
+  const ships = taskShips(t, S.rounds);
   app.innerHTML = `
-    <div class="card"><div class="muted">${esc(t.project || '')}${t.ship ? '・' + esc(t.ship) : ''}</div>
+    <div class="card"><div class="muted">${[t.project, t.wh, ships.join('、')].filter(Boolean).map(esc).join('・')}</div>
       <div>播種 <b>${put}</b>/${tot} 項・檢查 <b>${ck}</b>/${ckt} 籃・${S.rounds.length} 輪${flags ? `・<span class="pill warn">${flags} 筆異動</span>` : ''}${iss ? `・<span class="pill warn">${iss} 籃有問題</span>` : ''}</div>
       <div class="bar"><i style="width:${tot ? put / tot * 100 : 0}%"></i></div>
       <div class="bar"><i style="width:${ckt ? ck / ckt * 100 : 0}%;background:var(--steel)"></i></div>
       <div class="row" style="margin-top:10px"><button class="btn ghost small" id="share">分享任務網址</button></div></div>
-    <div class="list">${S.rounds.map(r => { const s = roundStat(r), c = checkStat(r), nf = Object.keys(r.flags || {}).length, ppl = activePeople(r);
+    <div class="list">${S.rounds.map(r => { const s = roundStat(r), c = checkStat(r), pk = pickStat(r), nf = Object.keys(r.flags || {}).length, ppl = activePeople(r);
       return `<div class="item ${c.total && c.done === c.total ? 'done' : ''}" data-r="${esc(r.id)}"><div class="main">
-        <div class="t">第 ${r.no} 輪${r.sheet ? '・' + esc(r.sheet) : ''}　單序 ${r.seqFrom}–${r.seqTo}</div>
-        <div class="s">${(r.orders || []).length} 籃・播種 ${s.put}/${s.total}・檢查 ${c.done}/${c.total}${nf ? `・<span class="pill warn">${nf} 異動</span>` : ''}${c.issues ? `・<span class="pill warn">${c.issues} 問題</span>` : ''}</div>
+        <div class="t">第 ${r.no} 輪${shipOf(r) ? '・' + esc(shipOf(r)) : ''}${r.sheet && r.sheet !== shipOf(r) ? '・' + esc(r.sheet) : ''}　單序 ${r.seqFrom}–${r.seqTo}</div>
+        <div class="s">${(r.orders || []).length} 籃・撿貨 ${pk.n}/${pk.total}・播種 ${s.put}/${s.total}・檢查 ${c.done}/${c.total}${nf ? `・<span class="pill warn">${nf} 異動</span>` : ''}${c.issues ? `・<span class="pill warn">${c.issues} 問題</span>` : ''}</div>
         ${ppl.length ? `<div class="s">👤 ${esc(ppl.join('、'))}</div>` : ''}
         <div class="bar"><i style="width:${s.total ? s.put / s.total * 100 : 0}%"></i></div></div></div>`; }).join('')}</div>
     ${t.createdBy === me.email ? `<div class="card" style="margin-top:12px"><button class="btn ghost" id="closeTask">${t.status === 'closed' ? '重新開啟這個任務' : '結束這個任務'}</button>
@@ -382,18 +412,33 @@ function openRound(rid){
   S.rid = rid; S.view = 'round'; render(); window.scrollTo(0, 0);
 }
 function roundHead(r){
-  const s = roundStat(r), c = checkStat(r), ppl = activePeople(r);
+  const s = roundStat(r), c = checkStat(r), pk = pickStat(r), ppl = activePeople(r);
   return `
     <div class="sticky">
-      <div class="seg"><button data-m="item" class="${S.mode === 'item' ? 'on' : ''}">播種・商品</button><button data-m="slot" class="${S.mode === 'slot' ? 'on' : ''}">播種・籃子</button><button data-m="check" class="${S.mode === 'check' ? 'on' : ''}">檢查</button></div>
-      <div class="muted">${r.sheet ? esc(r.sheet) + '・' : ''}單序 ${r.seqFrom}–${r.seqTo}・播種 ${s.put}/${s.total} 項・檢查 ${c.done}/${c.total} 籃${c.issues ? `・<b style="color:var(--warn)">${c.issues} 籃有問題</b>` : ''}${ppl.length ? `・👤 ${esc(ppl.join('、'))}` : ''}</div>
-      <div class="bar"><i style="width:${S.mode === 'check' ? (c.total ? c.done / c.total * 100 : 0) : (s.total ? s.put / s.total * 100 : 0)}%;${S.mode === 'check' ? 'background:var(--steel)' : ''}"></i></div>
+      <div class="seg four">${[['pick','撿貨'],['item','播種・商品'],['slot','播種・籃子'],['check','檢查']].map(([m, t]) => `<button data-m="${m}" class="${S.mode === m ? 'on' : ''}">${t}</button>`).join('')}</div>
+      <div class="muted">${shipOf(r) ? `<b>${esc(shipOf(r))}</b>・` : ''}單序 ${r.seqFrom}–${r.seqTo}・${S.mode === 'pick' ? `撿貨 ${pk.n}/${pk.total} 種` : `播種 ${s.put}/${s.total} 項`}・檢查 ${c.done}/${c.total} 籃${c.issues ? `・<b style="color:var(--warn)">${c.issues} 籃有問題</b>` : ''}${ppl.length ? `・👤 ${esc(ppl.join('、'))}` : ''}</div>
+      <div class="bar"><i style="width:${S.mode === 'check' ? (c.total ? c.done / c.total * 100 : 0) : S.mode === 'pick' ? (pk.total ? pk.n / pk.total * 100 : 0) : (s.total ? s.put / s.total * 100 : 0)}%;${S.mode === 'check' ? 'background:var(--steel)' : ''}"></i></div>
     </div>`;
 }
 function renderRound(app, r){
   setHeader(`第 ${r.no} 輪`, true);
   const s = roundStat(r), c = checkStat(r);
   let body = '';
+  if(S.mode === 'pick'){
+    const ps = pickList(r), pk = pickStat(r);
+    body = (pk.done ? '<div class="banner ok">這一輪的商品都撿齊了 👍 切到「播種・商品」開始配。</div>' : '')
+      + `<p class="muted" style="margin:0 0 8px">先把這一輪要的商品撿齊：撿齊一種就點一下打勾，大家都看得到。數量不夠的話照撿，配完到「檢查」回報缺件。</p>`
+      + `<ul class="lines">${ps.map((p, i) => { const pd = pickedOf(r, p.key);
+        return `<li class="${pd ? 'put' : ''}" data-pi="${i}"><span class="ck">${pd ? '✓' : ''}</span><span class="n">${esc(p.name)}<br><span class="muted">${p.sku ? esc(p.sku) + '・' : ''}${p.total} 籃${pd ? `・${esc(pd.byName || pd.by)} ${fmtTime(pd.at)}` : ''}</span></span><span class="q">${p.units}</span></li>`; }).join('')}</ul>`;
+    app.innerHTML = roundHead(r) + body;
+    app.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { S.mode = b.dataset.m; render(); });
+    app.querySelectorAll('[data-pi]').forEach(el => el.onclick = () => {
+      const p = ps[Number(el.dataset.pi)], on = !pickedOf(r, p.key);
+      buzz(on ? 30 : [20, 40, 20]);
+      api.updateRound(S.taskId, r.id, {[`picked.${hk(p.key)}`]: on ? {...stamp(), item: p.name} : null}).catch(e => toast('儲存失敗：' + e.message, 4000));
+    });
+    return;
+  }
   if(S.mode === 'item'){
     body = (s.done ? '<div class="banner ok">這一輪播種全部放完了 👍 託運單照籃號順序放進籃子，再切到「檢查」核對。</div>' : '')
       + `<p class="muted" style="margin:0 0 8px">一人負責一種商品：點進商品按「我負責」，大家就看得到誰在放什麼。</p>`
@@ -494,7 +539,7 @@ function renderItem(app, r){
 function slotHeader(r, o, big){
   const f = flagOf(r, o.slot);
   return `<div class="sticky"><div class="row" style="align-items:baseline"><div class="big" style="font-size:40px;flex:none">${o.slot} 號籃</div><div class="muted">${posText(o.slot)}</div></div>
-      ${big ? `<div class="who"><div class="nm">${esc(o.name)}</div><div>訂單 <b>${esc(o.id)}</b></div><div>單序 <b>${o.seq}</b>・末三碼 <b>${esc(o.p3)}</b>${S.task.ship ? '・' + esc(S.task.ship) : ''}</div></div>`
+      ${big ? `<div class="who"><div class="nm">${esc(o.name)}</div><div>訂單 <b>${esc(o.id)}</b></div><div>單序 <b>${o.seq}</b>・末三碼 <b>${esc(o.p3)}</b>${shipOf(r) ? '・' + esc(shipOf(r)) : ''}</div></div>`
         : `<div class="muted">單序 ${o.seq}・${esc(o.name)}（末三碼 ${esc(o.p3)}）・${esc(o.id)}</div>`}
       ${o.note ? `<div class="banner note">備註：${esc(o.note)}</div>` : ''}</div>
     ${isCancel(r, o.slot) ? `<div class="banner cancel">已取消，不要放，已放的退回上架</div>` : ''}
@@ -671,7 +716,7 @@ api.onAuth(async (user, err) => {
   try{
     const pf = await api.profile(user);
     if(!pf.ok || pf.blocked){ renderLogin(`${user.email} 沒有使用權限，請聯絡管理員到 Hub 加入帳號。`); return; }
-    me = {email: (user.email || '').toLowerCase(), name: pf.name};
+    me = {email: (user.email || '').toLowerCase(), name: pf.name, warehouses: pf.warehouses || []};
   }catch(e){ renderLogin('讀取權限失敗：' + e.message); return; }
   const want = new URLSearchParams(location.search).get('task');
   if(want) openTask(want); else openTasks();
