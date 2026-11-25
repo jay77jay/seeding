@@ -129,7 +129,7 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
    任務清單：同倉庫的人（hub_settings/users.warehouses 含任務的 wh）都看得到，點進去就加入；被指派只是標記。
    拿到任務網址（?task=）的 Hub 使用者也能加入（沒有 wh 的舊任務靠這個）。
    ?demo=1 用假資料，不連 Firestore（測試畫面用）。 */
-const SEED_VERSION = '2026-11-26-3';
+const SEED_VERSION = '2026-11-26-4';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DEMO = new URLSearchParams(location.search).has('demo');
@@ -416,7 +416,7 @@ function renderTask(app){
       <div>播種 <b>${put}</b>/${tot} 項・檢查 <b>${ck}</b>/${ckt} 籃・${S.rounds.length} 輪${flags ? `・<span class="pill warn">${flags} 筆異動</span>` : ''}${iss ? `・<span class="pill warn">${iss} 籃有問題</span>` : ''}</div>
       <div class="bar"><i style="width:${tot ? put / tot * 100 : 0}%"></i></div>
       <div class="bar"><i style="width:${ckt ? ck / ckt * 100 : 0}%;background:var(--steel)"></i></div>
-      <div class="row" style="margin-top:10px"><button class="btn ghost small" id="share">分享任務網址</button></div></div>
+      <div class="row" style="margin-top:10px"><button class="btn ghost small" id="share">分享任務網址</button><button class="btn ghost small" id="staffXls">下載人員統計</button></div></div>
     <div class="list">${S.rounds.map(r => { const s = roundStat(r), c = checkStat(r), pk = pickStat(r), nf = Object.keys(r.flags || {}).length, ppl = activePeople(r);
       return `<div class="item ${c.total && c.done === c.total ? 'done' : ''}" data-r="${esc(r.id)}"><div class="main">
         <div class="t">第 ${r.no} 輪${shipOf(r) ? '・' + esc(shipOf(r)) : ''}${r.sheet && r.sheet !== shipOf(r) ? '・' + esc(r.sheet) : ''}　單序 ${r.seqFrom}–${r.seqTo}</div>
@@ -428,6 +428,7 @@ function renderTask(app){
       <button class="btn danger" id="delTask" style="margin-top:10px">刪除這個任務</button>
       <p class="muted">刪除後所有輪次、撿貨／播種／檢查紀錄和問題回報都會消失，無法復原；正在用的同事會被帶回任務清單。只有發布的人和 Hub 管理員看得到這兩個按鈕。</p></div>` : ''}`;
   app.querySelectorAll('[data-r]').forEach(el => el.onclick = () => openRound(el.dataset.r));
+  $('#staffXls').onclick = async e => { const b = e.target; b.disabled = true; try{ await downloadStaffStats(t, S.rounds); }catch(err){ toast('下載失敗：' + err.message, 5000); } b.disabled = false; };
   $('#share').onclick = async () => {
     const url = location.origin + location.pathname + '?task=' + encodeURIComponent(t.id);
     try{ if(navigator.share){ await navigator.share({title: t.name, url}); return; } await navigator.clipboard.writeText(url); toast('已複製任務網址'); }
@@ -721,6 +722,53 @@ function openFindSheet(){
     $('#mClose').onclick = () => { m.hidden = true; };
   };
   draw(); $('#fq').focus();
+}
+
+/* ================= 人員統計下載（Excel）：誰撿貨、播種、檢查、回報問題 =================
+   資料都在各輪的 picked／placed／checked／issues，用登入帳號區分人；SheetJS 只在按下載時才載入（手機省流量） */
+function loadXlsx(){
+  if(window.XLSX) return Promise.resolve();
+  return new Promise((ok, ng) => { const s = document.createElement('script'); s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload = ok; s.onerror = () => ng(new Error('Excel 元件載入失敗，請確認網路')); document.head.appendChild(s); });
+}
+const fullTime = ms => { if(!ms) return ''; const d = new Date(ms), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}/${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+const todayTW = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Taipei'}).format(new Date()).replace(/-/g, '');
+async function downloadStaffStats(t, rounds){
+  await loadXlsx();
+  const P = new Map();   // email → 統計
+  const person = v => { const k = v.by || '?'; if(!P.has(k)) P.set(k, {name: v.byName || k, email: k, pick: 0, placeN: 0, placeQ: 0, check: 0, issue: 0, first: Infinity, last: 0}); const x = P.get(k); x.first = Math.min(x.first, v.at || Infinity); x.last = Math.max(x.last, v.at || 0); return x; };
+  const baskets = [['輪', '物流', '籃號', '位置', '單序', '訂單編號', '收件人', '狀態', '播種人', '核對人', '核對完成時間', '問題', '問題回報人']];
+  const picks = [['輪', '物流', '商品', 'SKU', '撿貨人', '時間']];
+  rounds.forEach(r => {
+    Object.values(r.picked || {}).forEach(v => { person(v).pick++; picks.push([r.no, shipOf(r), v.item || '', '', v.byName || v.by, fullTime(v.at)]); });
+    (r.orders || []).forEach(o => {
+      const placers = new Map(), checks = [];
+      o.items.forEach(it => {
+        const pv = (r.placed || {})[pkey(o.slot, it.k)]; if(pv){ const x = person(pv); x.placeN++; x.placeQ += Number(it.qty) || 0; placers.set(pv.by, pv.byName || pv.by); }
+        const cv = (r.checked || {})[pkey(o.slot, it.k)]; if(cv){ person(cv); checks.push(cv); }
+      });
+      const b = basketCheck(r, o), iss = issueOf(r, o.slot);
+      if(iss) person(iss).issue++;
+      checks.sort((a, c) => a.at - c.at);
+      const lastC = checks.at(-1);
+      if(b.done && !b.cancel && lastC) P.get(lastC.by).check++;   // 一籃算給最後核對完的人
+      baskets.push([r.no, shipOf(r), o.slot, posText(o.slot), o.seq, o.id, o.name,
+        b.cancel ? '取消' : iss ? '有問題' : b.done ? '可包裝' : b.c ? '檢查中' : '未檢查', [...placers.values()].join('、'), checkersOf(r, o).join('、'),
+        b.done && lastC ? fullTime(lastC.at) : '', iss ? `${ISSUE[iss.type] || iss.type}${iss.note ? '：' + iss.note : ''}` : '', iss ? (iss.byName || iss.by) : '']);
+    });
+  });
+  // 撿貨明細補 SKU（picked 只記商品名稱）
+  const skuOfName = new Map(); rounds.forEach(r => (r.orders || []).forEach(o => o.items.forEach(it => skuOfName.set(it.name, it.sku || ''))));
+  picks.slice(1).forEach(row => row[3] = skuOfName.get(row[2]) || '');
+  const people = [['人員', '帳號', '撿貨（品項）', '播種（項）', '播種（件）', '檢查（籃）', '回報問題（籃）', '第一筆動作', '最後一筆動作']];
+  [...P.values()].sort((a, b) => (b.check + b.placeN) - (a.check + a.placeN)).forEach(x =>
+    people.push([x.name, x.email, x.pick, x.placeN, x.placeQ, x.check, x.issue, fullTime(x.first === Infinity ? 0 : x.first), fullTime(x.last)]));
+  const wb = XLSX.utils.book_new(), add = (aoa, name, w) => { const ws = XLSX.utils.aoa_to_sheet(aoa); ws['!cols'] = w.map(n => ({wch: n})); XLSX.utils.book_append_sheet(wb, ws, name); };
+  add(people, '人員統計', [12, 26, 12, 10, 10, 10, 14, 17, 17]);
+  add(baskets, '籃子明細', [5, 8, 6, 18, 6, 18, 10, 8, 14, 14, 17, 24, 10]);
+  add(picks, '撿貨明細', [5, 8, 30, 18, 12, 17]);
+  XLSX.writeFile(wb, `${String(t.name || '播種任務').replace(/[\\/:*?"<>|]/g, '-')}_人員統計_${todayTW()}.xlsx`);
+  toast('已下載人員統計');
 }
 
 /* ================= 異動：取消／優先 ================= */
