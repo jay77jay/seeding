@@ -128,8 +128,12 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
    籃號：A 面 1～25、B 面 26～50，每面 5 層 × 5 格，從最上層左邊開始往右、再往下。
    任務清單：同倉庫的人（hub_settings/users.warehouses 含任務的 wh）都看得到，點進去就加入；被指派只是標記。
    拿到任務網址（?task=）的 Hub 使用者也能加入（沒有 wh 的舊任務靠這個）。
+   完成與自動清理（v2026-11-26-7）：
+     任務裡每一波都檢查完（沒有問題籃）→ 有人開著任務頁時寫入 doneDay（台灣日期 YYYYMMDD）、doneAt，清單顯示「已完成」
+     過了 doneDay 那天 → 清單打開時自動 status:'closed'（隱藏）
+     已自動結束的任務 → 發布者或 Hub 管理員打開清單時，跳窗詢問是否先下載人員統計，再刪除（可選「先保留」，當天不再問）
    ?demo=1 用假資料，不連 Firestore（測試畫面用）。 */
-const SEED_VERSION = '2026-11-26-6';
+const SEED_VERSION = '2026-11-26-7';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DEMO = new URLSearchParams(location.search).has('demo');
@@ -194,10 +198,10 @@ function fireApi(){
       return () => us.forEach(u => u());
     },
     watchTask(id, cb){
-      let task = null, rounds = [], gotT = false;
-      const push = () => gotT && cb(task, rounds);
+      let task = null, rounds = [], gotT = false, gotR = false;
+      const push = () => gotT && (gotR || !task) && cb(task, rounds);
       const u1 = T(id).onSnapshot(d => { gotT = true; task = d.exists ? {id:d.id, ...d.data()} : null; push(); }, e => toast('讀取失敗：' + e.message, 5000));
-      const u2 = T(id).collection('rounds').onSnapshot(qs => { rounds = qs.docs.map(d => ({id:d.id, ...d.data()})).sort((a,b) => a.no - b.no); push(); }, e => toast('讀取失敗：' + e.message, 5000));
+      const u2 = T(id).collection('rounds').onSnapshot(qs => { gotR = true; rounds = qs.docs.map(d => ({id:d.id, ...d.data()})).sort((a,b) => a.no - b.no); push(); }, e => toast('讀取失敗：' + e.message, 5000));
       return () => { u1(); u2(); };
     },
     join(taskId){ return T(taskId).update({members: FV.arrayUnion(me.email), [`memberNames.${hk(me.email)}`]: me.name}); },
@@ -207,6 +211,7 @@ function fireApi(){
       return T(taskId).collection('rounds').doc(rid).update(p);
     },
     updateTask(taskId, patch){ return T(taskId).update(patch); },
+    async getRounds(taskId){ const qs = await T(taskId).collection('rounds').get(); return qs.docs.map(d => ({id:d.id, ...d.data()})).sort((a,b) => a.no - b.no); },
     addLog(taskId, x){ return T(taskId).collection('log').add({...x, at: Date.now(), by: me.email, byName: me.name}); },
     // Firestore 刪文件不會連子集合一起刪：先刪 rounds、log 底下每一筆，最後刪任務本身
     async deleteTask(taskId){
@@ -241,6 +246,7 @@ function demoApi(){
     async updateRound(tid, rid, patch){ const r = rounds.find(x => x.id === rid); for(const [k, v] of Object.entries(patch)) setPath(r, k, v); emit(); },
     async updateTask(tid, patch){ Object.assign(task, patch); emit(); },
     async addLog(){},
+    async getRounds(){ return rounds.map(r => JSON.parse(JSON.stringify(r))); },
     async deleteTask(){ task.deleted = true; emit(); },
   };
 }
@@ -369,23 +375,63 @@ function openTasks(){
   if(S.unsub){ S.unsub(); S.unsub = null; }
   S.view = 'tasks'; S.taskId = null; S.task = null; S.rounds = []; S.rid = null;
   const u = new URL(location.href); u.searchParams.delete('task'); history.replaceState(null, '', u);
-  if(!S.unsubTasks) S.unsubTasks = api.watchTasks(ts => { S.tasks = ts; if(S.view === 'tasks') render(); });
-  render();
+  if(!S.unsubTasks) S.unsubTasks = api.watchTasks(ts => { S.tasks = ts; autoCloseDone(ts); if(S.view === 'tasks'){ render(); askCleanup(); } });
+  render(); askCleanup();
 }
+/* 完成的任務：完成那天之後自動結束（隱藏）。誰打開清單都會幫忙寫，寫失敗就下次再試 */
+const pastDone = t => !!t.doneDay && t.doneDay < todayTW();
+function autoCloseDone(ts){
+  ts.forEach(t => {
+    if(t.status === 'closed' || !pastDone(t) || S.warned['close_' + t.id]) return;
+    S.warned['close_' + t.id] = 1;
+    api.updateTask(t.id, {status: 'closed', autoClosedAt: Date.now()}).catch(() => { delete S.warned['close_' + t.id]; });
+  });
+}
+/* 已自動結束的完成任務：刪除前先問發布者／管理員要不要下載人員統計 */
+const snoozeKey = id => 'seedDelSnooze_' + id;
+const snoozed = id => { try{ return localStorage.getItem(snoozeKey(id)) === todayTW(); }catch(e){ return false; } };
+function askCleanup(){
+  if(S.view !== 'tasks' || !me || !$('#modal').hidden || S.cleaning) return;
+  const t = S.tasks.find(x => x.status === 'closed' && pastDone(x) && (x.createdBy === me.email || me.admin) && !snoozed(x.id) && !S.warned['del_' + x.id]);
+  if(!t) return;
+  S.warned['del_' + t.id] = 1;
+  const m = $('#modal'), sh = $('#sheet'); m.hidden = false;
+  sh.innerHTML = `<b style="font-size:18px">任務即將自動刪除</b>
+    <p>「${esc(t.name)}」${fmtDay(t.doneDay)} 已全部檢查完成並自動結束，現在要刪除（連同撿貨／播種／檢查紀錄）。</p>
+    <p class="muted">刪除前要先下載人員統計 Excel 嗎？刪除後就無法再下載。</p>
+    <div class="list" style="margin-top:10px">
+      <button class="btn" id="cDl">下載人員統計，再刪除</button>
+      <button class="btn danger" id="cDel">不用下載，直接刪除</button>
+      <button class="btn ghost" id="cKeep">先保留（明天再問）</button></div>
+    <p class="muted" id="cMsg"></p>`;
+  const close = () => { m.hidden = true; S.cleaning = false; setTimeout(askCleanup, 300); };
+  const go = async dl => {
+    S.cleaning = true; sh.querySelectorAll('button').forEach(b => b.disabled = true);
+    try{
+      if(dl){ $('#cMsg').textContent = '下載中…'; await downloadStaffStats(t, await api.getRounds(t.id)); }
+      $('#cMsg').textContent = '刪除中…'; await api.deleteTask(t.id); toast(`已刪除「${t.name}」`);
+      close();
+    }catch(e){ $('#cMsg').textContent = (dl ? '下載或刪除失敗，任務沒有刪除：' : '刪除失敗：') + e.message; sh.querySelectorAll('button').forEach(b => b.disabled = false); S.cleaning = false; }
+  };
+  $('#cDl').onclick = () => go(true);
+  $('#cDel').onclick = () => { if(confirm(`確定不下載人員統計，直接刪除「${t.name}」？刪除後無法復原。`)) go(false); };
+  $('#cKeep').onclick = () => { try{ localStorage.setItem(snoozeKey(t.id), todayTW()); }catch(e){} close(); };
+}
+const fmtDay = d => d ? `${d.slice(4, 6)}/${d.slice(6, 8)}` : '';
 function renderTasks(app){
   setHeader('播種任務', false);
-  const list = S.tasks.filter(t => S.showClosed || t.status !== 'closed').sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const nClosed = S.tasks.filter(t => t.status === 'closed').length;
+  const list = S.tasks.filter(t => S.showClosed || (t.status !== 'closed' && !pastDone(t))).sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const nClosed = S.tasks.filter(t => t.status === 'closed' || pastDone(t)).length;
   app.innerHTML = `
     <div class="card row"><div class="muted">${esc(me.name)}（${esc(me.email)}）${me.warehouses.length ? `<br>倉庫：${esc(me.warehouses.join('、'))}` : ''}</div><button class="btn ghost small" id="logout" style="flex:none">登出</button></div>
     <div class="list">${list.map(t => { const asg = (t.assignees || []).includes(me.email), ships = taskShips(t, []);
       return `
-      <div class="item ${t.status === 'closed' ? 'done' : ''}" data-id="${esc(t.id)}">
+      <div class="item ${t.status === 'closed' || t.doneDay ? 'done' : ''}" data-id="${esc(t.id)}">
         <div class="main"><div class="t">${esc(t.name)}</div>
         <div class="s">${t.wh ? esc(t.wh) + '・' : ''}${ships.length ? esc(ships.join('、')) + '・' : ''}${t.rounds || 0} 波・${t.orders || 0} 單</div>
         <div class="s">${fmtTime(t.createdAt || 0)} 由 ${esc(t.createdByName || t.createdBy)} 發布</div>
         ${asg ? '<div class="s"><span class="pill pri">指派給你</span></div>' : ''}</div>
-        <span class="pill ${t.status === 'closed' ? '' : 'ok'}">${t.status === 'closed' ? '已結束' : '進行中'}</span></div>`; }).join('')
+        <span class="pill ${t.status === 'closed' ? '' : t.doneDay ? 'ok' : 'pri'}">${t.status === 'closed' ? (t.doneDay ? '已完成・已結束' : '已結束') : t.doneDay ? '✓ 已完成' : '進行中'}</span></div>`; }).join('')
       || `<div class="card muted">目前沒有進行中的播種任務。${me.warehouses.length ? `${esc(me.warehouses.join('、'))}的任務都會出現在這裡，點進去就能加入；` : '你的 Hub 帳號沒有設定倉庫，只會看到被指派或開過網址的任務；'}任務由整單系統（order-batcher）發布。</div>`}</div>
     <p style="text-align:center"><label class="muted"><input type="checkbox" id="showClosed" ${S.showClosed ? 'checked' : ''}> 顯示已結束的任務${nClosed ? `（${nClosed}）` : ''}</label></p>`;
   app.querySelectorAll('[data-id]').forEach(el => el.onclick = () => openTask(el.dataset.id));
@@ -403,16 +449,29 @@ function openTask(id){
     S.task = t; S.rounds = rs;
     // 點進來（從清單或網址）就自動加入成員，之後任務會出現在他的清單
     if(!joined && !(t.members || []).includes(me.email)){ joined = true; api.join(id).catch(() => {}); }
+    syncDone(t, rs);
     render();
   });
   render();
+}
+/* 全部波次都檢查完（不含取消、沒有問題籃）就記下完成日；之後又有未完成（例如取消核對、回報問題）就清掉 */
+function taskDone(rs){
+  let n = 0, ok = 0; rs.forEach(r => { const c = checkStat(r); n += c.total; ok += c.done; });
+  return {n, ok, done: n > 0 && ok === n};
+}
+function syncDone(t, rs){
+  if(!rs.length || t.status === 'closed') return;
+  const d = taskDone(rs);
+  if(d.done && !t.doneDay) api.updateTask(t.id, {doneDay: todayTW(), doneAt: Date.now()}).catch(() => {});
+  else if(!d.done && t.doneDay) api.updateTask(t.id, {doneDay: null, doneAt: null}).catch(() => {});
 }
 function renderTask(app){
   const t = S.task; setHeader(t.name, true);
   let tot = 0, put = 0, flags = 0, ck = 0, ckt = 0, iss = 0;
   S.rounds.forEach(r => { const s = roundStat(r), c = checkStat(r); tot += s.total; put += s.put; flags += Object.keys(r.flags || {}).length; ck += c.done; ckt += c.total; iss += c.issues; });
-  const ships = taskShips(t, S.rounds);
+  const ships = taskShips(t, S.rounds), allDone = taskDone(S.rounds).done;
   app.innerHTML = `
+    ${allDone && t.status !== 'closed' ? '<div class="banner ok">這個任務全部檢查完成 🎉 明天會自動結束並從清單隱藏；刪除前會詢問發布者是否下載人員統計。</div>' : ''}
     <div class="card"><div class="muted">${[t.project, t.wh, ships.join('、')].filter(Boolean).map(esc).join('・')}</div>
       <div>播種 <b>${put}</b>/${tot} 項・檢查 <b>${ck}</b>/${ckt} 籃・${S.rounds.length} 波${flags ? `・<span class="pill warn">${flags} 筆異動</span>` : ''}${iss ? `・<span class="pill warn">${iss} 籃有問題</span>` : ''}</div>
       <div class="bar"><i style="width:${tot ? put / tot * 100 : 0}%"></i></div>
@@ -438,7 +497,7 @@ function renderTask(app){
   const ct = $('#closeTask'); if(ct) ct.onclick = async () => {
     const closing = t.status !== 'closed';
     if(closing && !confirm('確定結束這個任務？')) return;
-    await api.updateTask(t.id, {status: closing ? 'closed' : 'open'}); toast(closing ? '已結束' : '已重新開啟');
+    await api.updateTask(t.id, closing ? {status: 'closed'} : {status: 'open', doneDay: null, doneAt: null}); toast(closing ? '已結束' : '已重新開啟');
   };
   const dt = $('#delTask'); if(dt) dt.onclick = async () => {
     const done = S.rounds.reduce((a, r) => a + Object.keys(r.placed || {}).length + Object.keys(r.checked || {}).length, 0);
