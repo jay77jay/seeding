@@ -129,7 +129,7 @@ input.search{width:100%;padding:12px;border:1px solid var(--line);border-radius:
    任務清單：同倉庫的人（hub_settings/users.warehouses 含任務的 wh）都看得到，點進去就加入；被指派只是標記。
    拿到任務網址（?task=）的 Hub 使用者也能加入（沒有 wh 的舊任務靠這個）。
    ?demo=1 用假資料，不連 Firestore（測試畫面用）。 */
-const SEED_VERSION = '2026-11-26-5';
+const SEED_VERSION = '2026-11-26-6';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const DEMO = new URLSearchParams(location.search).has('demo');
@@ -176,7 +176,8 @@ function fireApi(){
       const [u, g] = await Promise.all([db.collection('hub_settings').doc('users').get(), db.collection('hub_settings').doc('global').get().catch(() => null)]);
       const users = u.exists ? u.data() : {}, email = (user.email || '').toLowerCase();
       const rec = users[email] || Object.entries(users).find(([k]) => k.toLowerCase() === email)?.[1];
-      const admins = ((g && g.exists && g.data().superAdmins) || []).map(x => String(x).toLowerCase());
+      // Hub 的超級管理員存在 hub_settings/global.admins（v2026-11-26-6 以前誤讀 superAdmins，管理員看不到刪除鈕）
+      const gd = (g && g.exists && g.data()) || {}, admins = [...(gd.admins || []), ...(gd.superAdmins || [])].map(x => String(x).toLowerCase());
       return {ok: !!rec || admins.includes(email), admin: admins.includes(email), blocked: !!(rec && (rec.blockedSystems || []).includes('seeding')), name: (rec && rec.name) || user.displayName || email,
         warehouses: ((rec && rec.warehouses) || []).map(String).filter(Boolean)};
     },
